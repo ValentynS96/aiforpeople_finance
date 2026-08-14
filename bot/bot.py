@@ -145,7 +145,7 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
     import file_handler as fh
 
     processing = await update.message.reply_text(
-        "⏳ Завантажую файл і розпізнаю виписку... (PDF — до 1 хв)"
+        "⏳ Завантажую файл і розпізнаю виписку... (PDF — до 2 хв)"
     )
 
     try:

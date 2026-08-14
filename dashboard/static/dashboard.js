@@ -231,7 +231,7 @@ async function uploadFile(file) {
   status.innerHTML = `
     <div class="upload-progress">
       <div class="progress-step" id="step-parse"><span class="step-icon">⏳</span> Розпізнання файлу</div>
-      <div class="progress-step" id="step-ai"><span class="step-icon">⏳</span> AI категоризація</div>
+      <div class="progress-step" id="step-ai"><span class="step-icon">⏳</span> AI категоризація (1–3 хв)</div>
       <div class="progress-step" id="step-save"><span class="step-icon">⏳</span> Збереження</div>
       <div class="progress-step" id="step-export"><span class="step-icon">⏳</span> Експорт у Google</div>
     </div>

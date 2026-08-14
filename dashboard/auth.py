@@ -17,8 +17,8 @@ import hmac
 import logging
 import os
 import secrets
-import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import Request
 from fastapi.responses import RedirectResponse
@@ -28,18 +28,31 @@ _log = logging.getLogger("auth")
 COOKIE_NAME = "admin_session"
 SESSION_DAYS = 7
 
-# Случайный per-process секрет (перезагружается при рестарте → сессии сбрасываются,
-# это плата за отсутствие SECRET_KEY в env). Логируем предупреждение.
-_random_secret = secrets.token_hex(32)
+# Файл секрета подписи cookie (рядом с БД): сессии ВЫЖИВАЮТ рестарты контейнера.
+_SIGNING_KEY_FILE = Path(__file__).resolve().parent.parent / "data" / "session.key"
 
 
 def _signing_secret() -> bytes:
-    """Секрет для подписи cookie: env SECRET_KEY || случайный per-process."""
+    """Секрет для подписи cookie: env SECRET_KEY || файл data/session.key (авто-генерация).
+
+    Раньше был случайный per-process — каждая пересборка контейнера сбрасывала
+    все сессии (пользователя «выбивало»). Теперь секрет постоянный.
+    """
     env_key = os.getenv("SECRET_KEY")
     if env_key:
         return env_key.encode("utf-8")
-    # Только для локальной разработки без настроенного SECRET_KEY
-    return _random_secret.encode("utf-8")
+    try:
+        if _SIGNING_KEY_FILE.exists():
+            return _SIGNING_KEY_FILE.read_text().strip().encode("utf-8")
+        _SIGNING_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        key = secrets.token_hex(32)
+        _SIGNING_KEY_FILE.write_text(key)
+        _SIGNING_KEY_FILE.chmod(0o600)
+        return key.encode("utf-8")
+    except OSError as e:
+        # недоступная ФС — fallback на per-process (сессии до рестарта)
+        _log.warning("session.key недоступен (%s) — сессии сбросятся при рестарте", e)
+        return secrets.token_hex(32).encode("utf-8")
 
 
 def admin_password() -> str:

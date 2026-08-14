@@ -25,16 +25,22 @@
           Перетягніть <strong>першу виписку</strong> сюди<br>або натисніть для вибору
         </div>
         <div class="upload-sub" style="font-size:15px;">PDF або CSV · до 20 МБ · IBAN знайдемо самі</div>
-        <div id="firstUploadStatus"></div>
       </div>
 
-      <div id="firstProgress" style="display:none;margin-bottom:16px;">
+      <!-- ПРОГРЕСС: живёт на сервере, переживает перезагрузку страницы -->
+      <div id="firstProgress" style="display:none;margin:16px 0;">
         <div class="upload-progress">
           <div class="progress-step" id="fstep-parse"><span class="step-icon">⏳</span> Розпізнання файлу</div>
-          <div class="progress-step" id="fstep-ai"><span class="step-icon">⏳</span> AI категоризація</div>
+          <div class="progress-step" id="fstep-ai"><span class="step-icon">⏳</span> AI категоризація (1–3 хв)</div>
           <div class="progress-step" id="fstep-save"><span class="step-icon">⏳</span> Збереження</div>
         </div>
         <div class="progress-msg" id="firstMsg">Починаю...</div>
+        <div id="firstResult"></div>
+        <!-- Кнопка активна ТОЛЬКО когда обработка завершена -->
+        <button class="btn" id="nextBtn" disabled
+                style="width:100%;justify-content:center;margin-top:12px;opacity:0.5;cursor:not-allowed;">
+          Далі → до дашборду
+        </button>
       </div>
 
       <!-- ВХОД ДЛЯ ВОЗВРАЩАЮЩИХСЯ -->
@@ -68,10 +74,14 @@
 <script>
 const zone = document.getElementById('firstUploadZone');
 const input = document.getElementById('firstFileInput');
-const statusEl = document.getElementById('firstUploadStatus');
+const resultEl = document.getElementById('firstResult');
+const nextBtn = document.getElementById('nextBtn');
+let pollTimer = null;
+let doneIban = null;
 
-zone.addEventListener('click', () => input.click());
-zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+// --- запуск загрузки ---
+zone.addEventListener('click', () => { if (!zone.classList.contains('busy')) input.click(); });
+zone.addEventListener('dragover', e => { e.preventDefault(); if (!zone.classList.contains('busy')) zone.classList.add('dragover'); });
 zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
 zone.addEventListener('drop', e => {
   e.preventDefault(); zone.classList.remove('dragover');
@@ -91,65 +101,109 @@ document.getElementById('demoBtn').addEventListener('click', () => {
 });
 
 async function uploadFirst(file) {
+  setZoneBusy(true);
   document.getElementById('firstProgress').style.display = 'block';
-  statusEl.className = '';
-  statusEl.innerHTML = '';
+  document.getElementById('firstMsg').textContent = '📄 Надсилаю файл...';
   const fd = new FormData();
   fd.append('file', file);
   try {
-    const resp = await fetch('/api/first-upload', { method: 'POST', body: fd });
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split('\n\n');
-      buffer = events.pop();
-      for (const evt of events) {
-        const lines = evt.split('\n');
-        let eventType = 'message', dataStr = '';
-        for (const line of lines) {
-          if (line.startsWith('event: ')) eventType = line.slice(7);
-          else if (line.startsWith('data: ')) dataStr += line.slice(6);
-        }
-        if (!dataStr) continue;
-        try { handleEvent(eventType, JSON.parse(dataStr)); } catch (e) {}
-      }
-    }
+    const r = await fetch('/api/first-upload', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok) { showError(data.error || 'Помилка'); return; }
+    localStorage.setItem('firstUploadJob', data.job_id);
+    startPolling(data.job_id);
   } catch (e) {
-    statusEl.className = 'err';
-    statusEl.innerHTML = '❌ Не вдалося зв\'язатись з сервером.';
+    showError('Не вдалося зв\'язатись з сервером.');
   }
 }
 
-async function handleEvent(eventType, data) {
-  const msg = document.getElementById('firstMsg');
-  if (eventType === 'step') {
-    const el = document.getElementById('fstep-' + data.step);
-    if (el) {
-      el.className = 'progress-step ' + data.status;
-      const icon = el.querySelector('.step-icon');
-      if (data.status === 'done') icon.textContent = '✅';
-      else if (data.status === 'active') icon.textContent = '🔄';
+// --- опрос статуса (задача живёт на сервере) ---
+function startPolling(jobId) {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(() => pollJob(jobId), 1500);
+  pollJob(jobId);
+}
+
+async function pollJob(jobId) {
+  let job;
+  try {
+    const r = await fetch('/api/job/' + jobId);
+    if (r.status === 404) { showError('Задачу не знайдено. Надішліть файл ще раз.'); return; }
+    job = await r.json();
+  } catch (e) { return; } // сеть мигнула — следующий тик повторит
+  renderJob(job);
+}
+
+function renderJob(job) {
+  document.getElementById('firstProgress').style.display = 'block';
+  const steps = ['parse', 'ai', 'save'];
+  const curIdx = steps.indexOf(job.step);
+  steps.forEach((s, i) => {
+    const el = document.getElementById('fstep-' + s);
+    const icon = el.querySelector('.step-icon');
+    if (job.status === 'done' || i < curIdx) {
+      el.className = 'progress-step done'; icon.textContent = '✅';
+    } else if (i === curIdx) {
+      el.className = 'progress-step active'; icon.textContent = '🔄';
     }
-    if (msg) msg.textContent = data.message;
-  } else if (eventType === 'error') {
-    statusEl.className = 'err';
-    statusEl.innerHTML = '❌ ' + (data.error || 'Помилка');
-  } else if (eventType === 'done') {
-    statusEl.className = 'ok';
-    statusEl.innerHTML = '✅ Оброблено ' + data.tx_count + ' транзакцій. Відкриваю дашборд...';
-    // ставим IBAN-сессию и переходим на дашборд
-    try {
-      await fetch('/api/attach-iban?iban=' + encodeURIComponent(data.iban));
-      window.location.href = '/';
-    } catch (e) {
-      window.location.href = '/';
-    }
+  });
+  document.getElementById('firstMsg').textContent = job.message || '';
+
+  if (job.status === 'running') return;
+
+  clearInterval(pollTimer);
+  localStorage.removeItem('firstUploadJob');
+
+  if (job.status === 'error') {
+    showError(job.error || 'Помилка');
+  } else if (job.status === 'done') {
+    doneIban = job.iban;
+    resultEl.className = 'ok';
+    resultEl.innerHTML = '✅ Оброблено <strong>' + job.tx_count + '</strong> транзакцій. Все збережено!';
+    nextBtn.disabled = false;
+    nextBtn.style.opacity = '1';
+    nextBtn.style.cursor = 'pointer';
   }
 }
+
+function showError(text) {
+  clearInterval(pollTimer);
+  localStorage.removeItem('firstUploadJob');
+  resultEl.className = 'err';
+  let html = '❌ ' + text;
+  // если ошибка про ключ/баланс — кнопка сразу в админку (секция «Ключі API»)
+  if (/ключ|баланс/i.test(text)) {
+    html += '<br><a href="/admin#secrets" class="btn small" style="display:inline-flex;margin-top:12px;">🔑 Оновити ключ в адмінці</a>';
+  } else {
+    html += '<br><span style="font-size:14px;color:var(--text-muted)">Спробуйте надіслати файл ще раз.</span>';
+  }
+  resultEl.innerHTML = html;
+  setZoneBusy(false);
+}
+
+function setZoneBusy(busy) {
+  zone.classList.toggle('busy', busy);
+  zone.style.opacity = busy ? '0.5' : '1';
+}
+
+// --- переход на дашборд (после завершения) ---
+nextBtn.addEventListener('click', async () => {
+  if (!doneIban) return;
+  nextBtn.disabled = true;
+  nextBtn.textContent = 'Відкриваю...';
+  try {
+    await fetch('/api/attach-iban?iban=' + encodeURIComponent(doneIban));
+  } catch (e) { /* cookie мог уже стоять */ }
+  window.location.href = '/';
+});
+
+// --- перезагрузка страницы: задача продолжается — восстанавливаем статус ---
+const savedJob = localStorage.getItem('firstUploadJob');
+if (savedJob) {
+  setZoneBusy(true);
+  startPolling(savedJob);
+}
 </script>
+<style>.upload-zone.busy { pointer-events: none; }</style>
 </body>
 </html>

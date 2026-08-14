@@ -108,6 +108,8 @@
         <input type="password" name="telegram_token" placeholder="123456:AAE...">
       </div>
       <button class="btn small" type="submit">Зберегти ключі</button>
+      <button class="btn secondary small" type="button" onclick="testDeepseekKey()">🧪 Перевірити ключ</button>
+      <span id="keyTestResult" style="margin-left:10px;font-size:14px;"></span>
     </form>
   </div>
 
@@ -234,6 +236,38 @@
 </div>
 
 <script>
+async function testDeepseekKey() {
+  const el = document.getElementById('keyTestResult');
+  el.textContent = '⏳ Перевіряю...';
+  el.style.color = 'var(--text-muted)';
+  // проверяем то, что СЕЙЧАС в поле (если введено), иначе — сохранённый в БД
+  const field = document.querySelector('input[name="deepseek_key"]');
+  const key = field ? field.value.trim() : '';
+  try {
+    const resp = await fetch('/api/deepseek/test-key', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ key }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      el.textContent = '❌ ' + (data.error || 'Ключ не працює');
+      el.style.color = 'var(--red)';
+      return;
+    }
+    el.textContent = '✅ Ключ робочий (' + data.models + ' моделей)';
+    el.style.color = 'var(--green)';
+  } catch (e) {
+    el.textContent = '❌ ' + e.message;
+    el.style.color = 'var(--red)';
+  }
+}
+
+// авто-проверка после сохранения ключей (?saved=secrets)
+if (new URLSearchParams(location.search).get('saved') === 'secrets') {
+  setTimeout(testDeepseekKey, 500);
+}
+
 async function exportSheets() {
   const r = document.getElementById('exportResult');
   r.textContent = '⏳ Експорт...';

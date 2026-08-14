@@ -372,7 +372,7 @@ async def api_upload(request: Request):
 
         # --- ЭТАП 3: AI категоризация ---
         yield send("step", {"step": "ai", "status": "active",
-                            "message": "🧠 AI розносить транзакції по категоріях... (10-30 сек)"})
+                            "message": "🧠 AI розносить транзакції по категоріях... (зазвичай 1–3 хвилини)"})
 
         api_key = db_bridge.get_deepseek_key()
         if not api_key:
@@ -386,7 +386,7 @@ async def api_upload(request: Request):
                                                      categories=categories, model=model)
         except ai.AIError as e:
             _log.error("категоризация %s: %s", filename, e)
-            yield send("error", {"error": "AI не зміг розпізнати транзакції. Спробуйте інший формат."})
+            yield send("error", {"error": _human_ai_error(str(e))})
             return
 
         yield send("step", {"step": "ai", "status": "done",
@@ -430,10 +430,10 @@ async def api_upload(request: Request):
 async def api_first_upload(request: Request):
     """ПЕРВАЯ загрузка виписки — без IBAN-сессии (новичок с welcome-страницы).
 
-    IBAN извлекается из самого файла. После успеха JS вызывает /api/attach-iban
-    (ставит cookie) и открывает дашборд.
+    Запускает ФОНОВУЮ задачу и сразу возвращает job_id. Обработка не умирает
+    при закрытии/перезагрузке страницы — статус смотрим через /api/job/{id}.
     """
-    import json as _json
+    import uuid as _uuid
 
     form = await request.form()
     upload = form.get("file")
@@ -448,63 +448,95 @@ async def api_first_upload(request: Request):
     if len(content) > 20 * 1024 * 1024:
         return JSONResponse({"error": "Файл занадто великий (макс. 20 МБ)"}, status_code=400)
 
+    job_id = _uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "step": "parse", "message": f"📄 Розпізнаю файл: {filename}..."}
+    _gc_jobs()
+    asyncio.create_task(_process_first_upload(job_id, content, filename))
+    return {"job_id": job_id}
+
+
+# Фоновые задачи первой загрузки: id → {status, step, message, ...}
+_jobs: dict[str, dict] = {}
+
+
+def _gc_jobs(max_jobs: int = 50):
+    """Держим последние N задач, старые удаляем."""
+    while len(_jobs) > max_jobs:
+        _jobs.pop(next(iter(_jobs)))
+
+
+async def _process_first_upload(job_id: str, content: bytes, filename: str):
+    """Фоновая обработка первой выписки: парсинг → IBAN → AI → сохранение.
+    Обновляет _jobs[job_id] на каждом шаге. Переживает перезагрузку страницы."""
     from bot import ai_engine as ai, db_bridge
     from bot.iban import extract_iban, mask
 
-    async def stream():
-        def send(event_type, data):
-            return f"event: {event_type}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+    def update(**kw):
+        _jobs[job_id].update(kw)
 
-        yield send("step", {"step": "parse", "status": "active",
-                            "message": f"📄 Розпізнаю файл: {filename}..."})
-        try:
-            from server.parser import parse
-            _tables, markdown = await asyncio.to_thread(parse, content, filename)
-        except Exception as e:
-            _log.error("парсинг %s: %s", filename, e)
-            yield send("error", {"error": "Не вдалося розібрати файл. Перевірте формат."})
-            return
+    try:
+        from server.parser import parse
+        _tables, markdown = await asyncio.to_thread(parse, content, filename)
         if not markdown or len(markdown.strip()) < 50:
-            yield send("error", {"error": "Файл порожній або текст не розпізнано"})
+            update(status="error", error="Файл порожній або текст не розпізнано")
             return
-        yield send("step", {"step": "parse", "status": "done",
-                            "message": "✅ Розпізнано текст виписки"})
 
-        # IBAN из файла (в отличие от обычной загрузки — здесь его берём)
         iban = extract_iban(markdown)
         if not iban:
-            yield send("error", {"error": "У файлі не знайдено IBAN рахунку. "
-                                          "Спробуйте виписку з реквізитами або введіть IBAN вручну нижче."})
+            update(status="error", error="У файлі не знайдено IBAN рахунку. "
+                                         "Спробуйте виписку з реквізитами або введіть IBAN вручну нижче.")
             return
-        yield send("step", {"step": "ai", "status": "active",
-                            "message": f"🏦 Рахунок: {mask(iban)}\n🧠 AI розносить транзакції... (10-30 сек)"})
+        update(step="ai", status="running",
+               message=f"✅ Файл розпізнано · 🏦 Рахунок: {mask(iban)} · "
+                       f"🧠 AI розносить транзакції (зазвичай 1–3 хвилини)...")
 
         api_key = db_bridge.get_deepseek_key()
         if not api_key:
-            yield send("error", {"error": "AI не налаштований. Зверніться до адміністратора."})
+            update(status="error", error="AI не налаштований (DeepSeek ключ). Зверніться до адміністратора.")
             return
-        try:
-            categories = db_bridge.get_categories()
-            model = db_bridge.get_deepseek_model()
-            transactions = await ai.categorize_async(markdown, api_key,
-                                                     categories=categories, model=model)
-        except ai.AIError as e:
-            _log.error("категоризация %s: %s", filename, e)
-            yield send("error", {"error": "AI не зміг розпізнати транзакції. Спробуйте інший формат."})
-            return
-        yield send("step", {"step": "ai", "status": "done",
-                            "message": f"✅ AI розібрав {len(transactions)} транзакцій"})
+        categories = db_bridge.get_categories()
+        model = db_bridge.get_deepseek_model()
+        transactions = await ai.categorize_async(markdown, api_key,
+                                                 categories=categories, model=model)
+        update(step="ai", message=f"✅ AI розібрав {len(transactions)} транзакцій")
 
-        yield send("step", {"step": "save", "status": "active",
-                            "message": "💾 Зберігаю..."})
+        update(step="save", status="running", message="💾 Зберігаю...")
         db_bridge.save_result(transactions, chat_id=iban, username="(web)", iban=iban)
         db_bridge.auto_export_to_sheets(transactions)
-        yield send("step", {"step": "save", "status": "done",
-                            "message": "✅ Збережено"})
 
-        yield send("done", {"ok": True, "iban": iban, "tx_count": len(transactions)})
+        update(status="done", step="save", iban=iban,
+               tx_count=len(transactions), message="✅ Готово!")
+        _log.info("first-upload %s: готово, iban=%s, tx=%d", job_id, mask(iban), len(transactions))
+    except ai.AIError as e:
+        _log.error("first-upload %s: AI помилка: %s", job_id, e)
+        update(status="error", error=_human_ai_error(str(e)))
+    except Exception as e:
+        _log.error("first-upload %s: %s", job_id, e, exc_info=True)
+        update(status="error", error="Не вдалося обробити файл. Спробуйте ще раз.")
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+
+def _human_ai_error(err_text: str) -> str:
+    """Переводит коды ошибок DeepSeek в понятные подсказки."""
+    if "401" in err_text or "Unauthorized" in err_text:
+        return ("Невірний DeepSeek API-ключ (401). Скопіюйте справжній ключ з "
+                "platform.deepseek.com → API Keys та оновіть його в адмінці (Ключі API).")
+    if "402" in err_text:
+        return ("Недостатньо коштів на DeepSeek (402). Поповніть баланс на "
+                "platform.deepseek.com (2–5 доларів вистачить надовго).")
+    if "429" in err_text:
+        return "Перевищено ліміт запитів DeepSeek (429). Зачекайте хвилину та спробуйте ще раз."
+    if "timeout" in err_text.lower() or "timed out" in err_text.lower():
+        return "AI відповів занадто довго. Спробуйте ще раз — або файл замалий для розпізнавання."
+    return "AI не зміг розпізнати транзакції. Спробуйте інший формат файлу."
+
+
+@router.get("/api/job/{job_id}")
+async def api_job_status(job_id: str):
+    """Статус фоновой задачи (poll с welcome-страницы)."""
+    job = _jobs.get(job_id)
+    if not job:
+        return JSONResponse({"status": "unknown", "error": "Задачу не знайдено"}, status_code=404)
+    return job
 
 
 @router.post("/admin/send-report")
@@ -576,6 +608,37 @@ async def api_deepseek_models(request: Request):
         "models": models,
         "current": db_bridge.get_deepseek_model(),
     }
+
+
+@router.post("/api/deepseek/test-key")
+async def api_deepseek_test_key(request: Request):
+    """Проверка DeepSeek ключа. Если в теле передан key — проверяем ЕГО
+    (введённый в форму, до сохранения); иначе — сохранённый в БД."""
+    redir = auth.require_auth(request)
+    if redir:
+        return JSONResponse({"ok": False, "error": "Потрібна авторизація"}, status_code=401)
+    import json as _json
+    from bot import ai_engine as ai, db_bridge
+
+    body = await request.body()
+    key = ""
+    try:
+        data = _json.loads(body)
+        key = (data.get("key") or "").strip()
+    except (ValueError, AttributeError):
+        pass
+    if not key:
+        key = db_bridge.get_deepseek_key()
+        if not key:
+            return JSONResponse({"ok": False, "error": "Ключ не заданий (ні в полі, ні в БД)"})
+    if " " in key:
+        return JSONResponse({"ok": False,
+                             "error": "Ключ містить пробіл — здається, при копіюванні прилип зайвий текст"})
+    try:
+        models = await asyncio.to_thread(ai.list_models, key)
+        return {"ok": True, "models": len(models), "current": db_bridge.get_deepseek_model()}
+    except ai.AIError as e:
+        return JSONResponse({"ok": False, "error": _human_ai_error(str(e))})
 
 
 @router.post("/admin/model")
@@ -709,8 +772,17 @@ async def setup_submit(request: Request,
         }, status_code=400)
 
     auth.set_admin_password(password)
-    if deepseek_key.strip():
-        db.set_secret("deepseek_key", deepseek_key.strip())
+    ds = deepseek_key.strip()
+    if ds:
+        # формат настоящего ключа DeepSeek: sk- + 32 hex-символа (35 всего)
+        import re as _re
+        if not _re.fullmatch(r"sk-[0-9a-f]{32}", ds):
+            return templates.TemplateResponse(request, "setup.html", {
+                "error": "DeepSeek ключ виглядає невірно. Справжній ключ: «sk-» + 32 символи "
+                         "(приклад: sk-0be3f1a2c3d4e5f67890abcdef1234567). "
+                         "Скопіюйте його повністю з platform.deepseek.com → API Keys.",
+            }, status_code=400)
+        db.set_secret("deepseek_key", ds)
 
     # бот стартует сразу, если токен ввели (иначе — позже через админку)
     if telegram_token.strip():
@@ -829,7 +901,21 @@ async def admin_save_secrets(request: Request,
         return redir
     # сохраняем только непустые поля (пустое = не менять)
     if deepseek_key.strip():
-        db.set_secret("deepseek_key", deepseek_key.strip())
+        ds = deepseek_key.strip()
+        # защита от прилипшего текста при копировании (напр. "... I DeepSeek")
+        if " " in ds:
+            return templates.TemplateResponse(request, "admin.html", {
+                "thresholds": db.get_setting("alert_thresholds", {}),
+                "categories": db.get_setting("categories", []),
+                "sheets": db.get_sheets_config(),
+                "sessions": db.list_sessions(limit=50),
+                "secret_status": _secret_status(),
+                "stats": db.stats(),
+                "next_report_run": "—",
+                "sheets_error": "DeepSeek ключ містить пробіл — здається, до нього прилип зайвий "
+                                "текст при копіюванні. Вставте чистий ключ (sk- + 32 символи).",
+            }, status_code=400)
+        db.set_secret("deepseek_key", ds)
     if telegram_token.strip():
         db.set_secret("telegram_token", telegram_token.strip())
         # перезапуск бота с новым токеном — в фоне, не блокируем ответ
