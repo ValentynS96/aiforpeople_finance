@@ -248,9 +248,10 @@ async def handle_chat(update: Update, _: ContextTypes.DEFAULT_TYPE):
 
     try:
         deepseek_key = db_bridge.get_deepseek_key()
-        # живая сводка по счетам + история
+        # живая сводка по счетам + история + RAG-поиск по вопросу
         summary_text = db_bridge.get_summary_for_user(chat_id)
-        system_prompt = ai.build_chat_system_prompt(summary_text)
+        relevant = db_bridge.find_relevant(user_msg, chat_id=str(chat_id))
+        system_prompt = ai.build_chat_system_prompt(summary_text, relevant=relevant)
         history = db_bridge.get_chat_history(chat_id, limit=10)
         model = db_bridge.get_deepseek_model()
 

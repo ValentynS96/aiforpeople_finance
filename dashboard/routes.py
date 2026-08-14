@@ -270,7 +270,9 @@ async def api_chat(request: Request):
     db.update_session_title_if_first(session_id, message)
     history = db.get_chat_history(iban, limit=10, session_id=session_id)
     summary = db_bridge.get_summary_by_iban(iban)
-    system_prompt = ai.build_chat_system_prompt(summary)
+    # RAG: ищем транзакции по словам вопроса (FTS5)
+    relevant = db_bridge.find_relevant(message, iban=iban)
+    system_prompt = ai.build_chat_system_prompt(summary, relevant=relevant)
 
     messages = [{"role": "system", "content": system_prompt}] + history
     try:

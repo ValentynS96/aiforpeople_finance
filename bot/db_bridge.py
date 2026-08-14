@@ -73,6 +73,110 @@ def save_result(transactions: list[dict], chat_id: str, username: str = "",
 # ============================================================
 # Сводка по счетам пользователя (для контекста ИИ-чата)
 # ============================================================
+# Стоп-слова для извлечения поискового запроса из вопроса пользователя
+_STOPWORDS = {
+    "скільки", "сколька", "я", "мені", "ми", "він", "вона", "вони", "це", "що", "як",
+    "де", "кому", "чому", "коли", "чи", "а", "і", "й", "та", "в", "у", "на", "з",
+    "із", "зі", "до", "за", "по", "від", "для", "про", "при", "без", "через",
+    "заплатив", "заплатила", "платив", "платила", "заплатити", "сплатив", "сплачував",
+    "витратив", "витратила", "витратив", "отримав", "отримала", "приніс", "принесла",
+    "принесли", "дав", "дала", "надав", "надала", "прийшов", "прийшла", "пришло",
+    "сума", "суму", "суми", "всього", "загалом", "разом", "був", "була", "були",
+    "є", "нема", "немає", "мій", "моя", "мої", "могли", "можеш", "можна",
+    "витрата", "витрати", "надходження", "платіж", "платежі", "категорія",
+    "категорії", "контрагент", "контрагенти", "бізнес", "рахунок", "виписка",
+    "скажи", "покажи", "порахуй", "рахуй", "треба", "хочу", "дізнатись", "дізнатися",
+}
+
+
+def extract_query(text: str) -> str:
+    """Из вопроса пользователя извлекает значимые токены для поиска.
+
+    «скільки я заплатив військового збору» → «військового збору»
+    «а тут скільки витратив Кур'єрська доставка #3397» → «курєрська доставка 3397»
+    """
+    import re
+    words = re.findall(r"[\w#]+", text.lower())
+    tokens = []
+    for w in words:
+        w2 = w.lstrip("#")
+        # числа важны (номера клиентов/доставок: 3397), стоп-слова и 1-буквенные — нет
+        if w2.isdigit() or (w not in _STOPWORDS and len(w2) > 1):
+            tokens.append(w2)
+    return " ".join(tokens)
+
+
+def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 10) -> str:
+    """FTS5-поиск транзакций по словам вопроса → блок для промпта чата (RAG).
+
+    Возвращает '' если запрос пустой или ничего не нашлось.
+    Агрегирует по описанию: «Оплата від клієнта #5619: 2 плат., надходження 68 340 грн».
+    """
+    q = extract_query(query)
+    if not q or len(q) < 3:
+        return ""
+    from bot import ai_engine as ai
+
+    ibans = [iban] if iban else []
+    if not ibans and chat_id:
+        ibans = [a["iban"] for a in db.list_accounts(chat_id=str(chat_id))]
+    if not ibans:
+        ibans = [""]
+
+    agg: dict[str, dict] = {}
+    for ib in ibans:
+        try:
+            # stems+OR: нечёткий поиск — стволы слов, хотя бы одно совпадение
+            # («військового збору» → військ* OR збору* → «Військовий збір»)
+            for t in db.search_transactions(q, iban=ib, limit=100, stems=True, op="OR"):
+                d = t["description"] or "—"
+                if d not in agg:
+                    agg[d] = {"count": 0, "income": 0.0, "expense": 0.0, "category": t.get("category", "")}
+                amt = t.get("amount") or 0
+                agg[d]["count"] += 1
+                if amt > 0:
+                    agg[d]["income"] += amt
+                else:
+                    agg[d]["expense"] += abs(amt)
+        except Exception:
+            continue
+
+    if not agg:
+        return ""
+    lines = []
+    for d, v in list(agg.items())[:limit]:
+        parts = [f"- {d} (категорія: {v['category'] or '—'}): {v['count']} плат."]
+        if v["income"] > 0:
+            parts.append(f"надходження {ai.fmt(v['income'])} грн")
+        if v["expense"] > 0:
+            parts.append(f"списання {ai.fmt(v['expense'])} грн")
+        lines.append(", ".join(parts))
+    return "ЗНАЙДЕНО ЗА ЗАПИТОМ КОРИСТУВАЧА (це точні дані з транзакцій):\n  " + "\n  ".join(lines)
+
+
+def _counterparties_block(iban: str, max_lines: int = 40) -> str:
+    """Блок «контрагенты» для контекста чата: топ по обороту.
+
+    Даёт ИИ возможность отвечать на вопросы про конкретных клиентов/продавцов
+    («сколько принёс клиент #5619», «кому я больше плачу»).
+    """
+    from bot import ai_engine as ai
+    cps = db.get_counterparties(iban=iban, limit=60)
+    if not cps:
+        return ""
+    lines = []
+    for c in cps[:max_lines]:
+        parts = [f"- {c['description']}: {c['count']} плат."]
+        if c["income"] > 0:
+            parts.append(f"надходження {ai.fmt(c['income'])} грн")
+        if c["expense"] > 0:
+            parts.append(f"списання {ai.fmt(c['expense'])} грн")
+        lines.append(", ".join(parts))
+    hidden = len(cps) - len(lines)
+    suffix = f"\n  (…іще {hidden} дрібніших)" if hidden > 0 else ""
+    return "  Контрагенти (агреговано за описом):\n    " + "\n    ".join(lines) + suffix + "\n"
+
+
 def get_summary_for_user(chat_id: str) -> str:
     """Текст-сводка по всем счетам пользователя. Для системного промпта ИИ-чата.
 
@@ -110,6 +214,8 @@ def get_summary_for_user(chat_id: str) -> str:
             f"  Виручка: {income} | Витрати: {expense} | Прибуток: {profit} грн\n"
             f"  Транзакцій: {metrics['tx_count']}\n"
         )
+        # контрагенты (для вопросов про конкретных клиентов)
+        line += _counterparties_block(a["iban"])
         # топ-3 категорії витрат
         by_cat = [(c, v["expense"]) for c, v in metrics["by_cat"].items() if v["expense"] > 0]
         by_cat.sort(key=lambda x: x[1], reverse=True)
@@ -189,6 +295,8 @@ def get_summary_by_iban(iban: str) -> str:
         f"  Виручка: {income} | Витрати: {expense} | Прибуток: {profit} грн\n"
         f"  Транзакцій: {metrics['tx_count']}\n"
     )
+    # контрагенты (для вопросов про конкретных клиентов)
+    line += _counterparties_block(iban)
     by_cat = [(c, v["expense"]) for c, v in metrics["by_cat"].items() if v["expense"] > 0]
     by_cat.sort(key=lambda x: x[1], reverse=True)
     if by_cat:

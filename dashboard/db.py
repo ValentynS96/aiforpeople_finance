@@ -48,15 +48,24 @@ _lock = threading.Lock()
 # ============================================================
 # FTS5-поиск (транзакции + чат)
 # ============================================================
-def _fts_query(q: str) -> str:
+def _fts_query(q: str, *, stems: bool = False, op: str = "AND") -> str:
     """Санитизирует пользовательский ввод в безопасный FTS5-запрос.
 
     'приват+банк' → '"приват"* "банк"*' (префиксный AND-поиск).
+    stems: обрезать токены до ствола (первые 6 симв.) — покрывает падежи
+           («військового» → «військ*» находит «Військовий»).
+    op: 'AND' между токенами (все слова) или 'OR' (хотя бы одно).
     Пустая строка если токенов нет.
     """
     import re
-    tokens = re.findall(r"[\w]+", q, re.UNICODE)
-    return " ".join(f'"{t}"*' for t in tokens[:5]) if tokens else ""
+    tokens = re.findall(r"[\w]+", q, re.UNICODE)[:6]
+    if not tokens:
+        return ""
+    parts = []
+    for t in tokens:
+        stem = t[:6] if stems and len(t) > 6 and not t.isdigit() else t
+        parts.append(f'"{stem}"*')
+    return f" {op} ".join(parts)
 
 
 def _init_fts(conn):
@@ -121,15 +130,17 @@ def _fts_available(conn) -> bool:
         return False
 
 
-def search_transactions(q: str, iban: str = "", limit: int = 200) -> list[dict]:
+def search_transactions(q: str, iban: str = "", limit: int = 200, *,
+                        stems: bool = False, op: str = "AND") -> list[dict]:
     """Полнотекстовый поиск по описанию и категории транзакций.
 
     FTS5 с префиксными токенами; LIKE-fallback если FTS5 нет.
+    stems/op — для морфологически нечёткого поиска (вопросы в чате).
     """
     like = f"%{q.strip()}%"
     with get_conn() as conn:
         if _fts_available(conn):
-            fts = _fts_query(q)
+            fts = _fts_query(q, stems=stems, op=op)
             if not fts:
                 return []
             sql = (
@@ -448,6 +459,37 @@ def delete_iban_data(iban: str) -> dict:
             "upload_sessions": sess,
             "accounts": acc,
         }
+
+
+def get_counterparties(iban: str = "", limit: int = 60) -> list[dict]:
+    """Агрегация транзакций по описанию (контрагентам) — для контекста ИИ-чата.
+
+    Позволяет отвечать на вопросы вида «сколько принёс клиент #5619»:
+    каждая строка = описание, число платежей, сумма прихода и расхода.
+    Сортировка по общему обороту.
+    """
+    sql = (
+        "SELECT description, COUNT(*) AS cnt, "
+        "  SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income, "
+        "  SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) AS expense "
+        "FROM transactions WHERE description IS NOT NULL AND description != ''"
+    )
+    params: list = []
+    if iban and iban != "all":
+        sql += " AND iban = ?"
+        params.append(iban)
+    sql += " GROUP BY description ORDER BY (income + expense) DESC LIMIT ?"
+    params.append(limit)
+    with get_conn() as conn:
+        return [
+            {
+                "description": r["description"],
+                "count": r["cnt"],
+                "income": round(r["income"] or 0, 2),
+                "expense": round(r["expense"] or 0, 2),
+            }
+            for r in conn.execute(sql, params).fetchall()
+        ]
 
 
 def get_periods(iban: str = "") -> dict:
