@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Первинне налаштування — AI Фінанси</title>
+<link rel="stylesheet" href="/static/style.css?v=5">
+</head>
+<body>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+
+<div class="login-wrap">
+  <div class="container" style="max-width:480px;">
+    <div class="login-card">
+      <h1>🚀 Первинне налаштування</h1>
+      <p style="margin-bottom:20px;">Це — єдиний раз. Далі все налаштовується в адмінці.</p>
+
+      <form method="post" action="/setup">
+        <div class="form-row">
+          <label>1️⃣ Придумай пароль адмінки <span style="font-size:11px;color:var(--text-muted)">(для входу в /admin)</span></label>
+          <input type="password" name="password" placeholder="Пароль (мін. 4 символи)" required minlength="4" autofocus>
+        </div>
+        <div class="form-row">
+          <label>Підтверди пароль</label>
+          <input type="password" name="password2" placeholder="Ще раз" required minlength="4">
+        </div>
+
+        <div class="form-row">
+          <label>2️⃣ DeepSeek API Key <span style="font-size:11px;color:var(--text-muted)">(мозок AI)</span></label>
+          <input type="password" name="deepseek_key" placeholder="sk-..." required>
+          <span class="hint">Отримати: <a href="https://platform.deepseek.com/" target="_blank" style="color:var(--cyan)">platform.deepseek.com</a> → API Keys (поповни баланс на $2–5)</span>
+        </div>
+
+        <div class="form-row">
+          <label>3️⃣ Telegram Bot Token <span style="font-size:11px;color:var(--text-muted)">(можна пізніше, в адмінці)</span></label>
+          <input type="password" name="telegram_token" placeholder="123456:AAE...">
+          <span class="hint">Отримати: <a href="https://t.me/BotFather" target="_blank" style="color:var(--cyan)">@BotFather</a> → /newbot</span>
+        </div>
+
+        <button class="btn" type="submit" style="width:100%;justify-content:center;">🚀 Почати роботу</button>
+      </form>
+
+      {% if error %}<div class="login-error" style="margin-top:16px;">{{ error }}</div>{% endif %}
+    </div>
+  </div>
+</div>
+</body>
+</html>

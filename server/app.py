@@ -36,50 +36,30 @@ async def lifespan(app: FastAPI):
     dashboard_db.init_db()
     _log.info("SQLite инициализирована: %s", dashboard_db.DB_PATH)
 
-    # Стартуем Telegram-бота в фоне (если токен есть)
+    # Telegram-бот (если токен уже задан — в БД или .env).
+    # Если зададут позже через setup-мастер/админку — бот поднимется через
+    # runtime.restart_bot() без перезапуска контейнера.
     try:
         import sys
         repo = str(Path(__file__).resolve().parent.parent)
         if repo not in sys.path:
             sys.path.insert(0, repo)
-        from bot.bot import build_application
         from server import runtime
-        _bot_app = build_application()
-        if _bot_app:
-            await _bot_app.initialize()
-            await _bot_app.start()
-            await _bot_app.updater.start_polling()
-            runtime.bot_app = _bot_app  # ссылка только после успешного старта
-            _log.info("🤖 Telegram-бот запущен вместе с сервером")
+        await runtime.start_bot()
+        _bot_app = runtime.bot_app
     except Exception as e:
         _log.warning("⚠️ Бот не запущен: %s (сервер продолжит работу)", e)
 
-    # Планировщик автоматизаций (ежемесячный P&L в Telegram)
-    scheduler = None
-    try:
-        from server.scheduler import start_scheduler, stop_scheduler
-        if _bot_app:
-            scheduler = start_scheduler(_bot_app)
-    except Exception as e:
-        _log.warning("⚠️ Планировщик не запущен: %s", e)
-
     yield
 
-    if scheduler:
-        try:
-            from server.scheduler import stop_scheduler
-            stop_scheduler()
-        except Exception:
-            pass
-
-    # Корректная остановка бота
-    if _bot_app:
-        try:
-            await _bot_app.updater.stop()
-            await _bot_app.stop()
-            await _bot_app.shutdown()
-        except Exception:
-            pass
+    # Корректная остановка планировщика и бота
+    try:
+        from server import runtime
+        from server.scheduler import stop_scheduler
+        stop_scheduler()
+        await runtime.stop_bot()
+    except Exception:
+        pass
 
 
 app = FastAPI(

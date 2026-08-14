@@ -22,3 +22,8 @@ webinar-landing-tz.md
 deploy.zip
 *.pdf
 *.html
+
+# Секреты никогда не попадают в образ
+.env
+*.env
+!bot/.env.example

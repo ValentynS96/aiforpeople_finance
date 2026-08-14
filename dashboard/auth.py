@@ -1,10 +1,13 @@
 """
-Авторизация админки: один пароль (ADMIN_PASSWORD из .env), signed-cookie сессия.
+Авторизация админки: пароль задаётся через setup-мастер (хранится хэшем
+в БД) или через ADMIN_PASSWORD в .env (для продвинутых, приоритет env).
+Signed-cookie сессия.
 
 Безопасность:
 - Пароль сравнивается через hmac.compare_digest (timing-safe).
+- Хэш пароля в БД: PBKDF2-HMAC-SHA256, случайная соль.
 - Cookie подписан HMAC-SHA256, содержит expiry + session-id (реверсивный).
-- secret_key: env SECRET_KEY || случайный (с предупреждением в логе).
+- secret_key: env SECRET_KEY || автогенерация в data/secret.key (см. crypto).
 - samesite=strict. Secure-флаг включается автоматически для https-запросов
   (для localhost/http остаётся без Secure, иначе браузер не примет cookie).
 """
@@ -40,15 +43,40 @@ def _signing_secret() -> bytes:
 
 
 def admin_password() -> str:
-    """Пароль админки из env. Если не задан — 'admin' с предупреждением."""
-    pw = os.getenv("ADMIN_PASSWORD")
-    if not pw:
-        _log.warning(
-            "⚠️ ADMIN_PASSWORD не задан — используем демо-пароль 'admin'. "
-            "НЕ используйте в продакшене! Задайте ADMIN_PASSWORD в .env."
-        )
-        return "admin"
-    return pw
+    """Пароль админки из env (если задан — приоритет). Пусто, если нет."""
+    return os.getenv("ADMIN_PASSWORD") or ""
+
+
+def set_admin_password(password: str):
+    """Сохраняет пароль админки в БД как PBKDF2-хэш с солью."""
+    from dashboard import db as _db
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("ascii"), 100_000
+    ).hex()
+    _db.set_setting("admin_password_hash", {"salt": salt, "hash": digest})
+
+
+def _check_db_password(password: str) -> bool:
+    """Сверяет пароль с хэшем из БД (timing-safe)."""
+    from dashboard import db as _db
+    record = _db.get_setting("admin_password_hash")
+    if not record or not isinstance(record, dict):
+        return False
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"),
+        record["salt"].encode("ascii"), 100_000
+    ).hex()
+    return hmac.compare_digest(digest, record["hash"])
+
+
+def is_setup_needed() -> bool:
+    """True если первичная настройка не пройдена: пароля нет ни в env, ни в БД."""
+    from dashboard import db as _db
+    if admin_password():
+        return False
+    record = _db.get_setting("admin_password_hash")
+    return not (record and isinstance(record, dict) and record.get("hash"))
 
 
 def _make_token(expires_at: str, session_id: str) -> str:
@@ -79,11 +107,16 @@ def _verify_token(token: str) -> bool:
 
 
 def check_password(password: str) -> bool:
-    """Проверяет пароль без установки cookie (для деструктивных действий).
-    Timing-safe сравнение. True если пароль верный."""
-    pw_bytes = password.encode("utf-8", errors="surrogatepass")
-    expected_bytes = admin_password().encode("utf-8", errors="surrogatepass")
-    return hmac.compare_digest(pw_bytes, expected_bytes)
+    """Проверяет пароль: env ADMIN_PASSWORD (приоритет) → хэш из БД.
+    Timing-safe. True если пароль верный."""
+    if not password:
+        return False
+    env_pw = admin_password()
+    if env_pw:
+        pw_bytes = password.encode("utf-8", errors="surrogatepass")
+        expected_bytes = env_pw.encode("utf-8", errors="surrogatepass")
+        return hmac.compare_digest(pw_bytes, expected_bytes)
+    return _check_db_password(password)
 
 
 def login(response, password: str) -> bool:

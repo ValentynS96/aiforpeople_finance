@@ -127,7 +127,10 @@ def _detect_anomalies(metrics: dict) -> list[str]:
 # ============================================================
 @router.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
-    """Если IBAN-сессии нет → welcome. Иначе → дашборд."""
+    """Если IBAN-сессии нет → welcome. Иначе → дашборд.
+    Первый запуск (нет пароля админки) → setup-мастер."""
+    if auth.is_setup_needed():
+        return RedirectResponse("/setup", status_code=303)
     iban = auth.get_iban_session(request)
     if not iban:
         return templates.TemplateResponse(request, "welcome.html", {})
@@ -582,10 +585,60 @@ async def api_accounts():
 
 
 # ============================================================
+# Первичная настройка (setup-маастер: пароль + ключи через UI)
+# ============================================================
+@router.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    """Мастер первого запуска. Если уже настроено — редирект в админку."""
+    if not auth.is_setup_needed():
+        return RedirectResponse("/admin", status_code=303)
+    return templates.TemplateResponse(request, "setup.html", {"error": ""})
+
+
+@router.post("/setup")
+async def setup_submit(request: Request,
+                       password: str = Form(...),
+                       password2: str = Form(...),
+                       deepseek_key: str = Form(""),
+                       telegram_token: str = Form("")):
+    """Сохраняет пароль (хэш в БД) + ключи (Fernet). Рестартит бота с токеном."""
+    if not auth.is_setup_needed():
+        return RedirectResponse("/admin", status_code=303)
+
+    if password != password2:
+        return templates.TemplateResponse(request, "setup.html", {
+            "error": "Паролі не співпадають",
+        }, status_code=400)
+    if len(password) < 4:
+        return templates.TemplateResponse(request, "setup.html", {
+            "error": "Пароль має бути мінімум 4 символи",
+        }, status_code=400)
+
+    auth.set_admin_password(password)
+    if deepseek_key.strip():
+        db.set_secret("deepseek_key", deepseek_key.strip())
+
+    # бот стартует сразу, если токен ввели (иначе — позже через админку)
+    if telegram_token.strip():
+        db.set_secret("telegram_token", telegram_token.strip())
+        from server import runtime
+        await runtime.restart_bot()
+
+    _log.info("✅ Первинне налаштування завершено")
+
+    # сразу логиним пользователя в админку
+    resp = RedirectResponse("/admin", status_code=303)
+    auth.login(resp, password)
+    return resp
+
+
+# ============================================================
 # Админка
 # ============================================================
 @router.get("/admin/login", response_class=HTMLResponse)
 async def admin_login_page(request: Request):
+    if auth.is_setup_needed():
+        return RedirectResponse("/setup", status_code=303)
     return templates.TemplateResponse(request, "admin_login.html", {"error": ""})
 
 
@@ -685,6 +738,10 @@ async def admin_save_secrets(request: Request,
         db.set_secret("deepseek_key", deepseek_key.strip())
     if telegram_token.strip():
         db.set_secret("telegram_token", telegram_token.strip())
+        # перезапуск бота с новым токеном — в фоне, не блокируем ответ
+        import asyncio as _a
+        from server import runtime
+        _a.get_event_loop().create_task(runtime.restart_bot())
     return RedirectResponse("/admin#secrets", status_code=303)
 
 

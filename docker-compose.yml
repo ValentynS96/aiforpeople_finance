@@ -4,8 +4,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data          # SQLite (транзакции, настройки, секреты) — persist
-      - ./.env:/app/.env:ro       # конфиг — read-only mount
+      - ./data:/app/data          # SQLite + мастер-ключ шифрования — persist
     environment:
       - PYTHONPATH=/app
     restart: always               # автозапуск при старте Docker и перезагрузке ПК
