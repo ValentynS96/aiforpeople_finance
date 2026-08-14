@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Первинне налаштування — AI Фінанси</title>
-<link rel="stylesheet" href="/static/style.css?v=5">
+<link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
 <div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
@@ -17,7 +17,7 @@
 
       <form method="post" action="/setup">
         <div class="form-row">
-          <label>1️⃣ Придумай пароль адмінки <span style="font-size:11px;color:var(--text-muted)">(для входу в /admin)</span></label>
+          <label>1️⃣ Придумай пароль адмінки <span style="font-size:15px;color:var(--text-muted)">(для входу в /admin)</span></label>
           <input type="password" name="password" placeholder="Пароль (мін. 4 символи)" required minlength="4" autofocus>
         </div>
         <div class="form-row">
@@ -26,13 +26,13 @@
         </div>
 
         <div class="form-row">
-          <label>2️⃣ DeepSeek API Key <span style="font-size:11px;color:var(--text-muted)">(мозок AI)</span></label>
+          <label>2️⃣ DeepSeek API Key <span style="font-size:15px;color:var(--text-muted)">(мозок AI)</span></label>
           <input type="password" name="deepseek_key" placeholder="sk-..." required>
           <span class="hint">Отримати: <a href="https://platform.deepseek.com/" target="_blank" style="color:var(--cyan)">platform.deepseek.com</a> → API Keys (поповни баланс на $2–5)</span>
         </div>
 
         <div class="form-row">
-          <label>3️⃣ Telegram Bot Token <span style="font-size:11px;color:var(--text-muted)">(можна пізніше, в адмінці)</span></label>
+          <label>3️⃣ Telegram Bot Token <span style="font-size:15px;color:var(--text-muted)">(можна пізніше, в адмінці)</span></label>
           <input type="password" name="telegram_token" placeholder="123456:AAE...">
           <span class="hint">Отримати: <a href="https://t.me/BotFather" target="_blank" style="color:var(--cyan)">@BotFather</a> → /newbot</span>
         </div>

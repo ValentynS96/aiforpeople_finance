@@ -426,6 +426,87 @@ async def api_upload(request: Request):
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+@router.post("/api/first-upload")
+async def api_first_upload(request: Request):
+    """ПЕРВАЯ загрузка виписки — без IBAN-сессии (новичок с welcome-страницы).
+
+    IBAN извлекается из самого файла. После успеха JS вызывает /api/attach-iban
+    (ставит cookie) и открывает дашборд.
+    """
+    import json as _json
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse({"error": "Файл не отримано"}, status_code=400)
+
+    content = await upload.read()
+    filename = upload.filename or "statement"
+    ext = Path(filename).suffix.lower()
+    if ext not in {".pdf", ".csv", ".txt"}:
+        return JSONResponse({"error": "Підтримуються лише PDF, CSV або TXT"}, status_code=400)
+    if len(content) > 20 * 1024 * 1024:
+        return JSONResponse({"error": "Файл занадто великий (макс. 20 МБ)"}, status_code=400)
+
+    from bot import ai_engine as ai, db_bridge
+    from bot.iban import extract_iban, mask
+
+    async def stream():
+        def send(event_type, data):
+            return f"event: {event_type}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+        yield send("step", {"step": "parse", "status": "active",
+                            "message": f"📄 Розпізнаю файл: {filename}..."})
+        try:
+            from server.parser import parse
+            _tables, markdown = await asyncio.to_thread(parse, content, filename)
+        except Exception as e:
+            _log.error("парсинг %s: %s", filename, e)
+            yield send("error", {"error": "Не вдалося розібрати файл. Перевірте формат."})
+            return
+        if not markdown or len(markdown.strip()) < 50:
+            yield send("error", {"error": "Файл порожній або текст не розпізнано"})
+            return
+        yield send("step", {"step": "parse", "status": "done",
+                            "message": "✅ Розпізнано текст виписки"})
+
+        # IBAN из файла (в отличие от обычной загрузки — здесь его берём)
+        iban = extract_iban(markdown)
+        if not iban:
+            yield send("error", {"error": "У файлі не знайдено IBAN рахунку. "
+                                          "Спробуйте виписку з реквізитами або введіть IBAN вручну нижче."})
+            return
+        yield send("step", {"step": "ai", "status": "active",
+                            "message": f"🏦 Рахунок: {mask(iban)}\n🧠 AI розносить транзакції... (10-30 сек)"})
+
+        api_key = db_bridge.get_deepseek_key()
+        if not api_key:
+            yield send("error", {"error": "AI не налаштований. Зверніться до адміністратора."})
+            return
+        try:
+            categories = db_bridge.get_categories()
+            model = db_bridge.get_deepseek_model()
+            transactions = await ai.categorize_async(markdown, api_key,
+                                                     categories=categories, model=model)
+        except ai.AIError as e:
+            _log.error("категоризация %s: %s", filename, e)
+            yield send("error", {"error": "AI не зміг розпізнати транзакції. Спробуйте інший формат."})
+            return
+        yield send("step", {"step": "ai", "status": "done",
+                            "message": f"✅ AI розібрав {len(transactions)} транзакцій"})
+
+        yield send("step", {"step": "save", "status": "active",
+                            "message": "💾 Зберігаю..."})
+        db_bridge.save_result(transactions, chat_id=iban, username="(web)", iban=iban)
+        db_bridge.auto_export_to_sheets(transactions)
+        yield send("step", {"step": "save", "status": "done",
+                            "message": "✅ Збережено"})
+
+        yield send("done", {"ok": True, "iban": iban, "tx_count": len(transactions)})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
 @router.post("/admin/send-report")
 async def admin_send_report(request: Request):
     """Ручной запуск ежемесячного P&L-отчёта (для демо). Требует админ-сессию."""
@@ -584,8 +665,21 @@ async def api_accounts():
     return {"accounts": result}
 
 
+@router.get("/api/attach-iban")
+async def api_attach_iban(iban: str):
+    """Ставит IBAN-сессию по параметру (после первой загрузки виписки).
+    Вызывается JS-ом после успешного /api/first-upload."""
+    from bot.iban import normalize, is_valid
+    norm = normalize(iban)
+    if not is_valid(norm):
+        return JSONResponse({"ok": False, "error": "Невірний IBAN"}, status_code=400)
+    resp = JSONResponse({"ok": True})
+    auth.set_iban_session(resp, norm)
+    return resp
+
+
 # ============================================================
-# Первичная настройка (setup-маастер: пароль + ключи через UI)
+# Первичная настройка (setup-мастер: пароль + ключи через UI)
 # ============================================================
 @router.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
@@ -626,8 +720,8 @@ async def setup_submit(request: Request,
 
     _log.info("✅ Первинне налаштування завершено")
 
-    # сразу логиним пользователя в админку
-    resp = RedirectResponse("/admin", status_code=303)
+    # сразу логиним и ведём на стартовую страницу (загрузка первой виписки)
+    resp = RedirectResponse("/", status_code=303)
     auth.login(resp, password)
     return resp
 

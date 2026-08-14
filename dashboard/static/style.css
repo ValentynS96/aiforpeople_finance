@@ -813,3 +813,49 @@ table { width: 100%; border-collapse: collapse; }
   color: var(--text-secondary);
   line-height: 1.5;
 }
+
+/* ============================================================
+   Крупные шрифты (читаемость) — переопределяют базовые размеры
+   ============================================================ */
+body { font-size: 17px; }
+
+/* Формы (мастер / логин / админка) */
+.form-row label { font-size: 18px; }
+.form-row input, .form-row textarea, .form-row select { font-size: 20px; padding: 14px 16px; }
+.hint { font-size: 15px; }
+
+/* Карточки входа и мастера */
+.login-card h1 { font-size: 34px; }
+.login-card p { font-size: 17px; }
+.login-error { font-size: 17px; }
+.welcome-card h1 { font-size: 38px; }
+.welcome-sub { font-size: 18px; }
+
+/* Кнопки */
+.btn { font-size: 17px; }
+.btn.small { font-size: 15px; }
+
+/* Дашборд: KPI и таблицы */
+.kpi-label { font-size: 17px; }
+.kpi-sub { font-size: 15px; }
+.chart-title { font-size: 17px; }
+.session-table td { font-size: 15px; }
+.session-table th { font-size: 13px; }
+
+/* Чат */
+.chat-sub { font-size: 15px; }
+.chat-msg { font-size: 16px; }
+.suggestion-chip { font-size: 15px; }
+
+/* Таблица транзакций */
+.tx-scroll td { font-size: 15px; }
+.tx-scroll th { font-size: 13px; }
+
+/* Поиск */
+.tx-search input { font-size: 17px; }
+.chat-search { font-size: 16px; }
+
+/* Админка: описания и статусы */
+.admin-section .desc { font-size: 15px; }
+.admin-section h2 { font-size: 24px; }
+.secret-status { font-size: 14px; }
