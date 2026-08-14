@@ -1,0 +1,25 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+bot/.venv/
+
+# === Локальные данные и секреты ===
+/.env
+bot/.env
+bot/*.json
+!bot/.env.example
+!bot/requirements.txt
+data/
+*.db
+
+# === macOS / IDE ===
+.DS_Store
+.idea/
+.vscode/
+
+# === Артефакты ===
+*.zip
+dist/

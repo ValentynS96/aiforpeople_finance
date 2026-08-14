@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Фінанси — вхід</title>
+<link rel="stylesheet" href="/static/style.css?v=3">
+</head>
+<body>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+
+<div class="login-wrap">
+  <div class="container" style="max-width:460px;">
+    <div class="welcome-card">
+      <div class="welcome-icon">💼</div>
+      <h1>AI замість фінансиста</h1>
+      <p class="welcome-sub">Ваш фінансовий помічник. Завантажте виписку — отримайте аналіз за хвилину.</p>
+
+      <form method="post" action="/login-iban" class="welcome-form">
+        <div class="form-row">
+          <label for="iban">№ рахунку (IBAN)</label>
+          <input type="text" id="iban" name="iban" placeholder="UA12 3456 7890..." autofocus required
+                 title="Номер вашого банківського рахунку. Починається з UA і містить 29 символів. Його можна знайти у виписці або додатку банку.">
+          <span class="hint">Номер вашого рахунку. Починається на «UA». Можна знайти у виписці.</span>
+        </div>
+        {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
+        <button class="btn" type="submit" style="width:100%;justify-content:center;">
+          Увійти →
+        </button>
+      </form>
+
+      <div class="welcome-divider">або</div>
+      <a href="#" class="btn secondary" style="width:100%;justify-content:center;" id="demoBtn">
+        Подивитись демо
+      </a>
+    </div>
+  </div>
+</div>
+
+<script>
+// Демо-режим: подставляет демо-IBAN
+document.getElementById('demoBtn').addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('iban').value = 'UA123456789000000000000012345';
+  document.querySelector('form').submit();
+});
+</script>
+</body>
+</html>

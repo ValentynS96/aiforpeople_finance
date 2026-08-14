@@ -1,0 +1,12 @@
+services:
+  ai-finansy:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data          # SQLite (транзакции, настройки, секреты) — persist
+      - ./.env:/app/.env:ro       # конфиг — read-only mount
+    environment:
+      - PYTHONPATH=/app
+    restart: always               # автозапуск при старте Docker и перезагрузке ПК
+    container_name: ai-finansy

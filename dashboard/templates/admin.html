@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Адмінка — AI замість фінансиста</title>
+<link rel="stylesheet" href="/static/style.css?v=5">
+</head>
+<body>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+
+<div class="container">
+  <div class="topbar">
+    <div class="topbar-brand">⚙️ <span class="gradient">Адмінка</span></div>
+    <div class="topbar-nav">
+      <a href="/">📊 Дашборд</a>
+      <a href="/admin/logout">Вийти</a>
+    </div>
+  </div>
+
+  <p style="color:var(--text-muted);font-size:13px;margin-bottom:24px;">
+    Транзакцій у БД: <strong style="color:var(--text)">{{ stats.transactions }}</strong> ·
+    Сесій: <strong style="color:var(--text)">{{ stats.sessions }}</strong>
+  </p>
+
+  <!-- 1. ПОРОГИ АЛЕРТОВ -->
+  <div class="admin-section" id="thresholds">
+    <h2>🚨 Пороги алертів</h2>
+    <p class="desc">Зміна порогів одразу впливає на аналіз наступних виписок (без перезапуску).</p>
+    <form method="post" action="/admin/thresholds">
+      <div class="checkbox-row" style="margin-bottom:16px;">
+        <input type="checkbox" name="cash_gap_enabled" id="cg"
+               {% if thresholds.cash_gap_enabled %}checked{% endif %}>
+        <label for="cg">Касовий розрив (прибуток &lt; 0)</label>
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Перевитрата категорії, % витрат</label>
+          <input type="number" name="category_share_pct" min="1" max="100" step="1"
+                 value="{{ thresholds.category_share_pct }}">
+        </div>
+        <div class="form-row">
+          <label>Податки × середнього</label>
+          <input type="number" name="taxes_multiplier" min="1" step="0.5"
+                 value="{{ thresholds.taxes_multiplier }}">
+        </div>
+        <div class="form-row">
+          <label>Зарплати % виручки</label>
+          <input type="number" name="salary_income_pct" min="1" max="200" step="1"
+                 value="{{ thresholds.salary_income_pct }}">
+        </div>
+      </div>
+      <button class="btn small" type="submit">Зберегти пороги</button>
+    </form>
+  </div>
+
+  <!-- 2. КАТЕГОРИИ -->
+  <div class="admin-section" id="categories">
+    <h2>🏷️ Категорії</h2>
+    <p class="desc">По одній на рядок. Порядок зберігається. AI буде використовувати цей список.</p>
+    <form method="post" action="/admin/categories">
+      <div class="form-row">
+        <textarea name="categories">{% for c in categories %}{{ c }}
+{% endfor %}</textarea>
+      </div>
+      <button class="btn small" type="submit">Зберегти категорії</button>
+    </form>
+  </div>
+
+  <!-- 2б. МОДЕЛЬ AI -->
+  <div class="admin-section" id="model">
+    <h2>🧠 Модель AI</h2>
+    <p class="desc">Яка модель DeepSeek обробляє виписки й відповідає в чаті. Список тягнеться актуальний з API.</p>
+    <div class="form-grid">
+      <div class="form-row">
+        <label>Модель</label>
+        <div style="display:flex;gap:8px;">
+          <select id="modelSelect" name="model" style="flex:1;">
+            <option value="">Завантажте список...</option>
+          </select>
+          <button class="btn small secondary" type="button" onclick="loadModels()">🔄 Оновити</button>
+        </div>
+      </div>
+    </div>
+    <button class="btn small" type="button" onclick="saveModel()">Зберегти модель</button>
+    <span id="modelStatus" style="margin-left:12px;font-size:13px;"></span>
+  </div>
+
+  <!-- 3. КЛЮЧИ API -->
+  <div class="admin-section" id="secrets">
+    <h2>🔑 Ключі API</h2>
+    <p class="desc">Зберігаються зашифрованими. Заповнюйте тільки те, що хочете змінити — порожнє поле не затирає.</p>
+    <form method="post" action="/admin/secrets">
+      <div class="form-row">
+        <label>DeepSeek API Key
+          {% if secret_status.deepseek_key %}
+          <span class="secret-status set">● налаштований</span>
+          {% else %}<span class="secret-status empty">○ не заданий</span>{% endif %}
+        </label>
+        <input type="password" name="deepseek_key" placeholder="sk-...">
+      </div>
+      <div class="form-row">
+        <label>Telegram Bot Token
+          {% if secret_status.telegram_token %}
+          <span class="secret-status set">● налаштований</span>
+          {% else %}<span class="secret-status empty">○ не заданий</span>{% endif %}
+        </label>
+        <input type="password" name="telegram_token" placeholder="123456:AAE...">
+      </div>
+      <button class="btn small" type="submit">Зберегти ключі</button>
+    </form>
+  </div>
+
+  <!-- 4. GOOGLE SHEETS (экспорт) -->
+  <div class="admin-section" id="sheets">
+    <h2>📋 Експорт у Google Sheets</h2>
+    <p class="desc">Автоматичне експортування транзакцій у вашу Google-таблицю при кожному завантаженні виписки.</p>
+    {% if sheets_error %}<div class="login-error" style="margin-bottom:12px;">⚠️ {{ sheets_error }}</div>{% endif %}
+
+    <details style="margin-bottom:16px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
+      <summary style="cursor:pointer;font-size:14px;color:var(--text-secondary);">📖 Як підключити Google-таблицю (4 кроки)</summary>
+      <ol style="margin-top:12px;padding-left:20px;font-size:13px;color:var(--text-secondary);line-height:1.8;">
+        <li>У <a href="https://console.cloud.google.com/" target="_blank" style="color:var(--cyan);">Google Cloud Console</a> створіть проєкт → увімкніть <strong>Google Sheets API</strong> та <strong>Google Drive API</strong></li>
+        <li><strong>IAM → Service Accounts → Create</strong> → відкрийте акаунт → <strong>Keys → Add Key → JSON</strong> → скачайте файл</li>
+        <li>У своїй Google-таблиці натисніть <strong>«Поділитися»</strong> → додайте email сервіс-аккаунту (поле <code>client_email</code> у JSON) → роль <strong>«Редактор»</strong></li>
+        <li>Скопіюйте вміст JSON-файлу ↓ у поле нижче, а ID таблиці — з URL (довгий код між <code>/d/</code> і <code>/edit</code>)</li>
+      </ol>
+    </details>
+
+    <form method="post" action="/admin/sheets" style="margin-bottom:16px;">
+      <div class="form-row">
+        <label>Google Sheet ID
+          <span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:6px;">з URL таблиці</span>
+        </label>
+        <input type="text" name="sheet_id" value="{{ sheets.sheet_id }}" placeholder="1mQor8lIqxTto-IIHuX4tMWoOHzeeg-KTBiJWMA10jwQ">
+      </div>
+      <div class="form-row">
+        <label>Service Account JSON-ключ
+          {% if sheets.has_credentials %}
+          <span class="secret-status set">● налаштований</span>
+          {% else %}<span class="secret-status empty">○ не заданий</span>{% endif %}
+        </label>
+        <textarea name="google_credentials" placeholder='{ "type": "service_account", "project_id": "...", ... }' style="font-family:'Courier New',monospace;font-size:11px;min-height:120px;"></textarea>
+        <span class="hint">Вставте повний вміст JSON-файлу. Зберігається зашифрованим. Порожнє поле — не змінює існуючий ключ.</span>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" name="enabled" id="shEn" {% if sheets.enabled %}checked{% endif %}>
+        <label for="shEn">Увімкнути автоматичний експорт (при кожній загрузці виписки)</label>
+      </div>
+      <button class="btn small" type="submit">Зберегти конфіг</button>
+    </form>
+
+    {% if sheets.has_credentials and sheets.sheet_id %}
+    <button class="btn secondary small" onclick="exportSheets()">📥 Експортувати транзакції</button>
+    <button class="btn secondary small" onclick="updatePL()">📊 Оновити P&L (Факти)</button>
+    <span id="exportResult" style="margin-left:12px;font-size:13px;display:block;margin-top:8px;"></span>
+    <span id="plResult" style="font-size:13px;display:block;margin-top:4px;"></span>
+    {% else %}
+    <p class="desc">💡 Щоб експортувати — спочатку додайте JSON-ключ та ID таблиці.</p>
+    {% endif %}
+  </div>
+
+  <!-- 5. ИСТОРИЯ ЗАГРУЗОК -->
+  <div class="admin-section" id="history">
+    <h2>📜 Історія завантажень</h2>
+    <p class="desc">Хто і коли завантажував виписки через бота.</p>
+    {% if sessions %}
+    <table class="session-table">
+      <thead><tr><th>Дата</th><th>Користувач</th><th>Chat ID</th><th>Транзакцій</th></tr></thead>
+      <tbody>
+        {% for s in sessions %}
+        <tr>
+          <td>{{ s.created_at }}</td>
+          <td>{{ s.username or '—' }}</td>
+          <td>{{ s.chat_id }}</td>
+          <td>{{ s.tx_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><div class="icon">📭</div>Поки що ніхто не завантажував виписки</div>
+    {% endif %}
+  </div>
+
+  <!-- 6. АВТОМАТИЗАЦІЇ (планировщик отчётов) -->
+  <div class="admin-section" id="automations">
+    <h2>📅 Автоматизації</h2>
+    <p class="desc">
+      Щомісячний P&L-звіт автоматично надсилається в Telegram усім рахункам з даними.
+      Наступний запуск: <strong>{{ next_report_run }}</strong> (1-го числа, 09:00, Київ).
+    </p>
+    <button class="btn secondary small" onclick="sendReportNow()">📤 Надіслати звіт зараз (демо)</button>
+    <span id="reportResult" style="margin-left:12px;font-size:13px;"></span>
+  </div>
+
+  <!-- 7. КЕРУВАННЯ ДАНИМИ (удаление по IBAN) -->
+  <div class="admin-section danger-zone" id="data-mgmt">
+    <div class="danger-header"><h2 style="margin:0;">⚠️ Керування даними</h2></div>
+    <div class="danger-body">
+      <p class="desc">Видалення всіх даних обраного рахунку (транзакції, чат, бесіди, сесії). Потребує пароля.</p>
+      <div id="accountsTableWrap">
+        <table class="session-table">
+          <thead><tr><th>IBAN</th><th>Власник</th><th>Транзакцій</th><th>Надходження</th><th>Витрати</th><th></th></tr></thead>
+          <tbody id="accountsBody">
+            <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">Завантажую...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- МОДАЛКА УДАЛЕНИЯ ДАННЫХ -->
+<div class="modal-overlay" id="deleteModal" style="display:none;">
+  <div class="modal-card">
+    <div class="modal-title">🗑 Видалити всі дані рахунку?</div>
+    <div class="modal-text">
+      Рахунок: <strong id="deleteIbanMask">—</strong>
+      <br>Будуть видалені: <strong>усі транзакції</strong>, <strong>історія чату</strong>,
+      <strong>бесіди</strong> та <strong>сесії завантажень</strong>.
+      <br><br>Цю дію <strong>неможливо скасувати</strong>.
+    </div>
+    <div class="modal-field">
+      <label for="deletePassword">Введіть пароль для підтвердження:</label>
+      <input type="password" id="deletePassword" placeholder="Пароль адміністратора" autocomplete="off">
+      <div class="modal-error" id="deleteError"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn secondary" onclick="closeDeleteModal()">Скасувати</button>
+      <button class="btn danger" id="deleteConfirmBtn" onclick="confirmDeleteData()">Видалити назавжди</button>
+    </div>
+  </div>
+</div>
+
+<script>
+async function exportSheets() {
+  const r = document.getElementById('exportResult');
+  r.textContent = '⏳ Експорт...';
+  r.style.color = 'var(--text-muted)';
+  try {
+    const resp = await fetch('/admin/export-sheets', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      r.innerHTML = `✅ Експортовано ${data.rows} рядків — <a href="${data.url}" target="_blank" style="color:var(--cyan)">відкрити</a>`;
+      r.style.color = 'var(--green)';
+    } else {
+      r.textContent = '❌ ' + (data.error || 'Помилка');
+      r.style.color = 'var(--red)';
+    }
+  } catch (e) {
+    r.textContent = '❌ ' + e.message;
+    r.style.color = 'var(--red)';
+  }
+}
+
+async function updatePL() {
+  const r = document.getElementById('plResult');
+  r.textContent = '⏳ Оновлюю P&L...';
+  r.style.color = 'var(--text-muted)';
+  try {
+    const resp = await fetch('/admin/update-pl', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      r.innerHTML = `✅ Оновлено <strong>${data.updated}</strong> ячейок за <strong>${data.month || '?'}</strong>` +
+        (data.skipped_formulas ? ` (формул пропущено: ${data.skipped_formulas})` : '') +
+        (data.cells.length ? `<br><span style="font-size:11px;color:var(--text-muted)">${data.cells.join(', ')}</span>` : '');
+      r.style.color = 'var(--green)';
+    } else {
+      r.textContent = '❌ ' + (data.error || 'Помилка');
+      r.style.color = 'var(--red)';
+    }
+  } catch (e) {
+    r.textContent = '❌ ' + e.message;
+    r.style.color = 'var(--red)';
+  }
+}
+
+// ============================================================
+// Модель DeepSeek: список тянется через API
+// ============================================================
+async function loadModels() {
+  const sel = document.getElementById('modelSelect');
+  const st = document.getElementById('modelStatus');
+  sel.innerHTML = '<option value="">Завантажую...</option>';
+  st.textContent = '🔄 Завантажую список...';
+  try {
+    const r = await fetch('/api/deepseek/models');
+    const data = await r.json();
+    if (!r.ok) {
+      sel.innerHTML = '<option value="">Помилка</option>';
+      st.textContent = '❌ ' + (data.error || 'Помилка');
+      st.style.color = 'var(--red)';
+      return;
+    }
+    sel.innerHTML = '';
+    data.models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m; opt.textContent = m;
+      if (m === data.current) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    st.textContent = '✅ ' + data.models.length + ' моделей. Поточна: ' + data.current;
+    st.style.color = 'var(--green)';
+  } catch (e) {
+    sel.innerHTML = '<option value="">Помилка</option>';
+    st.textContent = '❌ ' + e.message;
+    st.style.color = 'var(--red)';
+  }
+}
+
+async function saveModel() {
+  const sel = document.getElementById('modelSelect');
+  const st = document.getElementById('modelStatus');
+  const model = sel.value;
+  if (!model) { st.textContent = '❌ Оберіть модель'; return; }
+  const fd = new FormData();
+  fd.append('model', model);
+  try {
+    const r = await fetch('/admin/model', { method: 'POST', body: fd });
+    if (r.ok) {
+      st.textContent = '✅ Збережено: ' + model;
+      st.style.color = 'var(--green)';
+    } else {
+      st.textContent = '❌ Помилка збереження';
+      st.style.color = 'var(--red)';
+    }
+  } catch (e) {
+    st.textContent = '❌ ' + e.message;
+    st.style.color = 'var(--red)';
+  }
+}
+
+// Загрузить модели при открытии админки
+loadModels();
+
+// ============================================================
+// Керування даними: список IBAN + видалення
+// ============================================================
+let pendingDeleteIban = '';
+
+const PALETTE = ['#6366f1','#8b5cf6','#a855f7','#22d3ee','#10b981','#f59e0b','#ef4444','#ec4899'];
+const fmt = n => new Intl.NumberFormat('uk-UA').format(Math.round(n));
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function maskIban(iban) {
+  if (!iban) return '—';
+  const s = iban.replace(/\s+/g, '');
+  return s.length >= 12 ? s.slice(0,4) + ' •••• ' + s.slice(-4) : s;
+}
+
+async function loadAccounts() {
+  try {
+    const r = await fetch('/api/accounts');
+    const data = await r.json();
+    const tbody = document.getElementById('accountsBody');
+    const accs = data.accounts || [];
+    if (!accs.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">Рахунків поки що немає</td></tr>';
+      return;
+    }
+    tbody.innerHTML = accs.map(a => `
+      <tr>
+        <td title="${a.iban}">${maskIban(a.iban)}</td>
+        <td>${esc(a.holder) || '—'}</td>
+        <td>${a.tx_count}</td>
+        <td style="color:var(--green);">${fmt(a.income)}</td>
+        <td style="color:var(--red);">${fmt(a.expense)}</td>
+        <td><button class="btn danger small" onclick="openDeleteModal('${a.iban}')">🗑 Видалити</button></td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    console.error('loadAccounts', e);
+  }
+}
+
+function openDeleteModal(iban) {
+  pendingDeleteIban = iban;
+  document.getElementById('deleteIbanMask').textContent = maskIban(iban);
+  document.getElementById('deleteModal').style.display = 'flex';
+  document.getElementById('deletePassword').value = '';
+  document.getElementById('deleteError').textContent = '';
+  document.getElementById('deleteConfirmBtn').disabled = false;
+  setTimeout(() => document.getElementById('deletePassword').focus(), 50);
+}
+
+function closeDeleteModal() {
+  document.getElementById('deleteModal').style.display = 'none';
+  pendingDeleteIban = '';
+}
+
+async function confirmDeleteData() {
+  const password = document.getElementById('deletePassword').value;
+  const errEl = document.getElementById('deleteError');
+  const btn = document.getElementById('deleteConfirmBtn');
+  if (!password) { errEl.textContent = 'Введіть пароль'; return; }
+  if (!pendingDeleteIban) { errEl.textContent = 'Рахунок не обрано'; return; }
+  errEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'Видаляю...';
+  try {
+    const r = await fetch('/api/delete-data', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ password, iban: pendingDeleteIban }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      errEl.textContent = data.error || 'Помилка';
+      btn.disabled = false;
+      btn.textContent = 'Видалити назавжди';
+      return;
+    }
+    closeDeleteModal();
+    btn.disabled = false;
+    btn.textContent = 'Видалити назавжди';
+    loadAccounts();
+    alert('✅ Дані рахунку видалено: ' + data.deleted.transactions + ' транзакцій, ' +
+          (data.deleted.chat_messages || 0) + ' повідомлень чату');
+  } catch (e) {
+    errEl.textContent = 'Не вдалося зв\'язатись з сервером';
+    btn.disabled = false;
+    btn.textContent = 'Видалити назавжди';
+  }
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDeleteModal(); });
+
+// ============================================================
+// Автоматизации: ручной запуск месячного отчёта
+// ============================================================
+async function sendReportNow() {
+  const r = document.getElementById('reportResult');
+  r.textContent = '⏳ Надсилаю...';
+  r.style.color = 'var(--text-muted)';
+  try {
+    const resp = await fetch('/admin/send-report', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      r.textContent = `✅ Надіслано ${data.sent} звітів за ${data.month}` +
+        (data.skipped ? ` (пропущено без даних: ${data.skipped})` : '');
+      r.style.color = 'var(--green)';
+    } else {
+      r.textContent = '❌ ' + (data.error || 'Помилка');
+      r.style.color = 'var(--red)';
+    }
+  } catch (e) {
+    r.textContent = '❌ ' + e.message;
+    r.style.color = 'var(--red)';
+  }
+}
+
+loadAccounts();
+</script>
+</body>
+</html>

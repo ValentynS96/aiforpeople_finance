@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Фінанси — {{ iban_mask }}</title>
+<link rel="stylesheet" href="/static/style.css?v=5">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+
+<div class="container">
+  <!-- ШАПКА -->
+  <div class="topbar">
+    <div class="topbar-brand">💼 AI <span class="gradient">Фінанси</span></div>
+    <div class="topbar-nav">
+      <span class="account-badge" title="Ваш номер рахунку">🏦 {{ iban_mask }}</span>
+      <a href="/admin" title="Налаштування для куратора">⚙️</a>
+      <a href="/logout-iban" title="Вийти з іншого рахунку">Вийти</a>
+    </div>
+  </div>
+
+  <!-- ТАБЫ: Дашборд / Історія чату -->
+  <div class="tabs-bar">
+    <button class="tab-btn active" id="tabDashboard" onclick="switchTab('dashboard')">📊 Дашборд</button>
+    <button class="tab-btn" id="tabHistory" onclick="switchTab('history')">💬 Історія чату</button>
+  </div>
+
+  <!-- ОСНОВНОЙ LAYOUT: графики | чат -->
+  <div class="main-layout" id="dashboardView">
+
+    <!-- ЛЕВАЯ КОЛОНКА: фильтры + графики + таблица + загрузка -->
+    <div class="left-col">
+
+      <!-- Пустое состояние, если данных ещё нет -->
+      <div id="emptyState" class="empty-state" style="display:none;">
+        <div class="icon">📄</div>
+        <h3>По цьому рахунку ще немає даних</h3>
+        <p>Завантажте виписку (PDF або CSV) — і я покажу аналіз тут.</p>
+        <button class="btn" onclick="document.getElementById('fileInput').click()">📎 Завантажити виписку</button>
+      </div>
+
+      <!-- ПЕРЕКЛЮЧАТЕЛЬ ПЕРИОДОВ -->
+      <div class="period-switcher">
+        <button class="period-btn active" id="periodAll" onclick="selectPeriod('all')">Увесь час</button>
+        <select class="period-btn" id="periodMonth" onchange="selectPeriod('month')" title="Обрати місяць">
+          <option value="">📅 Місяць</option>
+        </select>
+        <select class="period-btn" id="periodYear" onchange="selectPeriod('year')" title="Обрати рік">
+          <option value="">📅 Рік</option>
+        </select>
+      </div>
+
+      <!-- ФИЛЬТРЫ -->
+      <form class="filters" id="filters">
+        <div class="filter-group">
+          <label>Період від</label>
+          <input type="date" id="fFrom" title="Показати транзакції з цієї дати">
+        </div>
+        <div class="filter-group">
+          <label>до</label>
+          <input type="date" id="fTo" title="Показати транзакції до цієї дати">
+        </div>
+        <div class="filter-group">
+          <label>Категорія</label>
+          <select id="fCategory" title="Фільтр за категорією витрат">
+            <option value="all">Усі</option>
+            {% for c in categories %}
+            <option value="{{ c }}">{{ c }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button class="btn small" id="applyFilters" type="button">Показати</button>
+        <button class="btn secondary small" id="resetFilters" type="button">Скинути</button>
+      </form>
+
+      <!-- KPI -->
+      <div class="kpi-grid">
+        <div class="kpi-card income">
+          <div class="kpi-label">Надходження</div>
+          <div class="kpi-value" id="kpiIncome">—</div>
+          <div class="kpi-sub" id="kpiTopCat"></div>
+        </div>
+        <div class="kpi-card expense">
+          <div class="kpi-label">Витрати</div>
+          <div class="kpi-value" id="kpiExpense">—</div>
+        </div>
+        <div class="kpi-card profit">
+          <div class="kpi-label">Прибуток</div>
+          <div class="kpi-value" id="kpiProfit">—</div>
+        </div>
+        <div class="kpi-card margin">
+          <div class="kpi-label" title="Прибуток поділити на надходження, помножити на 100. Показує, скільки з кожної заробленої гривні лишається чистими.">Маржа <span class="qmark">?</span></div>
+          <div class="kpi-value" id="kpiMargin">—</div>
+          <div class="kpi-sub"><span id="kpiTxCount">0</span> транзакцій</div>
+        </div>
+      </div>
+
+      <!-- АЛЕРТЫ -->
+      <div class="alert-panel empty" id="alertPanel">
+        <div class="alert-title">🚨 Зверніть увагу</div>
+        <div id="alertList"></div>
+      </div>
+
+      <!-- ГРАФИКИ -->
+      <div class="charts-grid">
+        <div class="chart-card">
+          <div class="chart-title">Витрати за категоріями</div>
+          <div class="chart-wrap"><canvas id="catChart"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Надходження vs Витрати по тижнях</div>
+          <div class="chart-wrap"><canvas id="weeklyChart"></canvas></div>
+        </div>
+      </div>
+
+      <!-- ЗАГРУЗКА ВЫПИСКИ -->
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" accept=".pdf,.csv,.txt" hidden>
+        <div class="upload-icon">📎</div>
+        <div class="upload-text">
+          Перетягніть виписку сюди або <strong>натисніть для вибору</strong>
+        </div>
+        <div class="upload-sub">PDF або CSV — прив'яжеться до рахунку {{ iban_mask }}</div>
+        <div id="uploadStatus"></div>
+      </div>
+
+      <!-- ТАБЛИЦА + ПОИСК -->
+      <div class="tx-toolbar">
+        <div class="chart-title" style="font-size:15px;margin:0;">Останні транзакції</div>
+        <div class="tx-search">
+          <input type="text" id="txSearch" placeholder="🔍 Пошук: Приватбанк, реклама..."
+                 autocomplete="off" title="Повнотекстовий пошук за описом і категорією">
+          <button class="btn secondary small" id="txSearchClear" type="button" style="display:none;" title="Очистити">✕</button>
+        </div>
+      </div>
+      <div class="tx-table-wrap">
+        <div class="tx-scroll">
+          <table>
+            <thead>
+              <tr><th>Дата</th><th>Опис</th><th>Категорія</th><th class="num">Сума</th><th>Тип</th></tr>
+            </thead>
+            <tbody id="txBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ПРАВАЯ КОЛОНКА: чат -->
+    <div class="chat-col">
+      <div class="chat-panel">
+        <div class="chat-header">
+          <span>💬 Помічник</span>
+          <span class="chat-sub">Питайте про ваші фінанси</span>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-msg assistant">
+            Привіт! 👋 Я ваш AI-фінансовий помічник.
+            Запитайте мене про витрати, прибуток або аномалії.
+            Наприклад: <em>«Скільки я витратив на рекламу?»</em>
+          </div>
+        </div>
+        <div class="chat-suggestions" id="chatSuggestions">
+          <button class="suggestion-chip" data-q="Скільки всього я витратив?">💸 Усього витрат</button>
+          <button class="suggestion-chip" data-q="Яка моя найбільша категорія витрат?">🏆 Найбільша витрата</button>
+          <button class="suggestion-chip" data-q="Є аномалії у моїх фінансах?">🚨 Аномалії</button>
+        </div>
+        <form class="chat-input-row" id="chatForm">
+          <input type="text" id="chatInput" placeholder="Напишіть питання..." autocomplete="off">
+          <button class="btn small" type="submit" id="chatSend">→</button>
+        </form>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ВКЛАДКА: Історія чату (ChatGPT-style: сайдбар + сообщения) -->
+  <div class="history-view" id="historyView" style="display:none;">
+    <div class="chat-layout">
+      <!-- Сайдбар: список бесед -->
+      <div class="chat-sessions" id="chatSessions">
+        <button class="session-new" onclick="newSession()">➕ Нова бесіда</button>
+        <input type="text" id="chatSearch" class="chat-search"
+               placeholder="🔍 Пошук у чаті..." autocomplete="off"
+               title="Пошук за повідомленнями в усіх бесідах">
+        <div class="session-list" id="sessionList">
+          <div class="session-empty">Поки що немає бесід</div>
+        </div>
+      </div>
+      <!-- Область сообщений выбранной беседы -->
+      <div class="chat-main">
+        <div class="chat-main-header">
+          <span id="currentSessionTitle">Оберіть бесіду</span>
+          <button class="btn secondary small" id="clearSessionBtn" onclick="clearChatHistory()" style="display:none;">🧹 Очистити</button>
+        </div>
+        <div class="chat-messages-full" id="historyMessages">
+          <div class="empty-state"><div class="icon">💬</div>Оберіть бесіду зліва або створіть нову</div>
+        </div>
+        <form class="chat-input-row" id="historyChatForm" onsubmit="return false;">
+          <input type="text" id="historyChatInput" placeholder="Напишіть повідомлення..." autocomplete="off">
+          <button class="btn small" type="submit" onclick="sendHistoryMessage()">→</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/dashboard.js?v=9"></script>
+<script src="/static/chat.js?v=6"></script>
+</body>
+</html>
