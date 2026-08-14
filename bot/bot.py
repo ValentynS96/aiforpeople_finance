@@ -67,16 +67,30 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _accounts_or_all(chat_id) -> list[dict]:
+    """Рахунки Telegram-чату. Якщо за чатом своїх рахунків немає (виписку
+    завантажили через веб-форму, де chat_id = IBAN) — повертаємо всі рахунки:
+    система персональна, тож це ті самі дані користувача."""
+    accounts = db_bridge.list_user_accounts(str(chat_id))
+    if not accounts:
+        accounts = db_bridge.list_user_accounts("")
+        if accounts:
+            log.info("chat=%s: своїх рахунків немає — показую всі (веб-загрузка)", chat_id)
+    return accounts
+
+
 async def cmd_summary(update: Update, _: ContextTypes.DEFAULT_TYPE):
     """ИИ-генерируемая сводка по всем счетам пользователя."""
     chat_id = update.message.chat_id
-    accounts = db_bridge.list_user_accounts(chat_id)
+    accounts = _accounts_or_all(chat_id)
     if not accounts:
         await update.message.reply_text(
             "У тебе ще немає завантажених виписок. Надішли PDF або CSV виписку 📎"
         )
         return
     summary_text = db_bridge.get_summary_for_user(chat_id)
+    if not summary_text:
+        summary_text = db_bridge.get_summary_for_user("")
     # отправим как plain text (без markdown, т.к. в сводке могут быть спецсимволы)
     await update.message.reply_text(summary_text or "Дані поки що порожні.")
 
@@ -84,7 +98,7 @@ async def cmd_summary(update: Update, _: ContextTypes.DEFAULT_TYPE):
 async def cmd_accounts(update: Update, _: ContextTypes.DEFAULT_TYPE):
     """Список счетов пользователя с краткой статистикой."""
     chat_id = update.message.chat_id
-    accounts = db_bridge.list_user_accounts(chat_id)
+    accounts = _accounts_or_all(chat_id)
     if not accounts:
         await update.message.reply_text(
             "У тебе ще немає рахунків. Надішли виписку (PDF/CSV) 📎"
@@ -115,7 +129,7 @@ async def cmd_reset(update: Update, _: ContextTypes.DEFAULT_TYPE):
 async def cmd_report(update: Update, _: ContextTypes.DEFAULT_TYPE):
     """P&L-отчёт за прошлый месяц по всем счетам пользователя (по запросу)."""
     chat_id = update.message.chat_id
-    accounts = db_bridge.list_user_accounts(chat_id)
+    accounts = _accounts_or_all(chat_id)
     if not accounts:
         await update.message.reply_text(
             "У тебе ще немає рахунків з даними. Надішли виписку (PDF/CSV) 📎"
@@ -250,6 +264,10 @@ async def handle_chat(update: Update, _: ContextTypes.DEFAULT_TYPE):
         deepseek_key = db_bridge.get_deepseek_key()
         # живая сводка по счетам + история + RAG-поиск по вопросу
         summary_text = db_bridge.get_summary_for_user(chat_id)
+        if not summary_text:
+            # виписка завантажена через веб (chat_id = IBAN) — система персональна,
+            # тож ІІ бачить зведення по всіх рахунках користувача
+            summary_text = db_bridge.get_summary_for_user("")
         relevant = db_bridge.find_relevant(user_msg, chat_id=str(chat_id))
         system_prompt = ai.build_chat_system_prompt(summary_text, relevant=relevant)
         history = db_bridge.get_chat_history(chat_id, limit=10)

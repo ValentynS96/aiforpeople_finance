@@ -88,6 +88,20 @@ _STOPWORDS = {
     "скажи", "покажи", "порахуй", "рахуй", "треба", "хочу", "дізнатись", "дізнатися",
 }
 
+# Синоніми для пошуку: як користувач пише → як названо у виписці.
+# У виписках бренди латинкою (Zoom, SWIFT), а питання — кирилицею/скороченнями.
+_QUERY_ALIASES = {
+    "зум": "zoom",
+    "свіфт": "swift",
+    "єп": "єдиний податок",
+    "есв": "єсв",
+    "гугл": "google",
+    "мета": "meta",
+    "дропбокс": "dropbox",
+    "ноушн": "notion",
+    "апл": "apple",
+}
+
 
 def extract_query(text: str) -> str:
     """Из вопроса пользователя извлекает значимые токены для поиска.
@@ -115,6 +129,12 @@ def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 10
     q = extract_query(query)
     if not q or len(q) < 3:
         return ""
+    # розширюємо синонімами («зум» → zoom, «єп» → «єдиний податок»):
+    # інакше FTS не збереже різні алфавіти/скорочення
+    words = q.split()
+    extra = [a for a in (_QUERY_ALIASES.get(w, "") for w in words) if a]
+    if extra:
+        q = " ".join(words + extra)
     from bot import ai_engine as ai
 
     ibans = [iban] if iban else []
