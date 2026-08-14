@@ -15,15 +15,12 @@ if (chatForm) {
     e.preventDefault();
     const msg = chatInput.value.trim();
     if (!msg) return;
+    chatInput.value = '';  // чистим сразу — не ждём ответа ИИ
     await sendChatMessage(msg, 'mini');
-    chatInput.value = '';
   });
   document.querySelectorAll('.suggestion-chip').forEach(chip => {
     chip.addEventListener('click', async () => {
-      const q = chip.dataset.q;
-      chatInput.value = q;
-      await sendChatMessage(q, 'mini');
-      chatInput.value = '';
+      await sendChatMessage(chip.dataset.q, 'mini');
     });
   });
 }
