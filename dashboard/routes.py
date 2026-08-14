@@ -384,8 +384,19 @@ async def api_upload(request: Request):
         try:
             categories = db_bridge.get_categories()
             model = db_bridge.get_deepseek_model()
-            transactions = await ai.categorize_async(markdown, api_key,
-                                                     categories=categories, model=model)
+
+            # категоризація йде частинами — показуємо прогрес у стрімі
+            box = {"done": 0, "total": 0}
+            task = asyncio.create_task(ai.categorize_async(
+                markdown, api_key, categories=categories, model=model,
+                progress_cb=lambda done, total: box.update(done=done, total=total)))
+            while not task.done():
+                await asyncio.sleep(1)
+                if box["total"] > 1 and box["done"]:
+                    yield send("step", {"step": "ai", "status": "active",
+                                        "message": f"🧠 AI розносить транзакції: "
+                                                   f"оброблено {box['done']} з {box['total']} частин..."})
+            transactions = await task
         except ai.AIError as e:
             _log.error("категоризация %s: %s", filename, e)
             yield send("error", {"error": _human_ai_error(str(e))})
@@ -498,8 +509,16 @@ async def _process_first_upload(job_id: str, content: bytes, filename: str):
             return
         categories = db_bridge.get_categories()
         model = db_bridge.get_deepseek_model()
+
+        def ai_progress(done: int, total: int):
+            if total > 1:
+                update(step="ai", status="running",
+                       message=f"✅ Файл розпізнано · 🏦 Рахунок: {mask(iban)} · "
+                               f"🧠 AI розносить транзакції: оброблено {done} з {total} частин...")
+
         transactions = await ai.categorize_async(markdown, api_key,
-                                                 categories=categories, model=model)
+                                                 categories=categories, model=model,
+                                                 progress_cb=ai_progress)
         update(step="ai", message=f"✅ AI розібрав {len(transactions)} транзакцій")
 
         update(step="save", status="running", message="💾 Зберігаю...")

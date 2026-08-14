@@ -17,6 +17,8 @@ AI-движок для демо «AI замість фінансиста».
 import asyncio
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import requests
@@ -71,6 +73,56 @@ DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"  # безопасный дефолт; реальная — из БД/админки
 
+# Великі виписки категоризуємо ЧАСТИНАМИ: один запит на всю виписку змушує
+# DeepSeek генерувати гігантський JSON (десятки тисяч токенів) — це повільно,
+# дорого, і такий запит регулярно повертає порожню відповідь.
+CHUNK_CHARS = 3500     # орієнтовний розмір частини (≈60 транзакцій)
+CHUNK_ATTEMPTS = 2     # спроб на частину (мережеві збої / порожні відповіді)
+CHUNK_WORKERS = 3      # скільки частин категоризуємо паралельно
+
+# Рядок, що починає транзакцію: дата на початку рядка (02.12.2025 / 2025-12-02)
+_TX_START_RE = re.compile(r"^(?:\d{2}[./]\d{2}[./]\d{4}|\d{4}-\d{2}-\d{2})\b", re.M)
+
+
+def _split_statement(text: str, max_chars: int = CHUNK_CHARS) -> list[str]:
+    """Розбиває текст виписки на частини по кордонах транзакцій.
+
+    Транзакція починається рядком з датою; шапка (банк, IBAN, період)
+    додається до кожної частини, щоб AI бачив контекст рахунку.
+    Якщо дат не знайдено — проста розбивка по рядках.
+    """
+    matches = list(_TX_START_RE.finditer(text))
+    if not matches:
+        if len(text) <= max_chars:
+            return [text]
+        parts, buf, size = [], [], 0
+        for line in text.splitlines(keepends=True):
+            if buf and size + len(line) > max_chars:
+                parts.append("".join(buf))
+                buf, size = [], 0
+            buf.append(line)
+            size += len(line)
+        if buf:
+            parts.append("".join(buf))
+        return parts
+
+    header = text[:matches[0].start()]
+    blocks = [
+        text[m.start(): matches[i + 1].start() if i + 1 < len(matches) else len(text)]
+        for i, m in enumerate(matches)
+    ]
+
+    parts, buf, size = [], [], 0
+    for block in blocks:
+        if buf and size + len(block) > max_chars:
+            parts.append(header + "".join(buf))
+            buf, size = [], 0
+        buf.append(block)
+        size += len(block)
+    if buf:
+        parts.append(header + "".join(buf))
+    return parts
+
 
 class AIError(Exception):
     """Помилка категоризації/парсингу — ловиться в боті й відправляється юзеру."""
@@ -109,26 +161,78 @@ def build_system_prompt(categories: list[str] | None = None) -> str:
 # ============================================================
 # 1. Категоризація через DeepSeek
 # ============================================================
-def categorize(text: str, api_key: str, *, timeout: int = 90,
+def categorize(text: str, api_key: str, *, timeout: int = 300,
                categories: list[str] | None = None,
-               model: str = "") -> list[dict]:
+               model: str = "",
+               progress_cb=None) -> list[dict]:
     """Сира виписка → масив транзакцій з категоріями.
+
+    Великі виписки автоматично розбиваються на частини (_split_statement),
+    кожна категоризується окремим запитом (до CHUNK_WORKERS паралельно) —
+    швидко і без порожніх відповідей.
 
     categories: список категорий (по умолчанию канонические 8). Передавайте из БД,
     чтобы изменения в админке влияли на категоризацию.
     model: модель DeepSeek (по умолчанию DEEPSEEK_DEFAULT_MODEL; реальная — из БД).
+    progress_cb: необов'язковий callback(done, total) — викликається після
+    завершення кожної частини (для прогресу в UI).
     Повертає список [{date, description, amount, type, category}].
     Кидає AIError при помилці мережі/AI/парсингу.
     """
     if not api_key:
         raise AIError("DEEPSEEK_API_KEY не налаштований.")
 
-    system_prompt = build_system_prompt(categories)
+    chunks = _split_statement(text)
+    total = len(chunks)
+    lock = threading.Lock()
+    done = 0
+
+    def work(i: int, chunk: str) -> list[dict]:
+        nonlocal done
+        last_err: AIError | None = None
+        for attempt in range(1, CHUNK_ATTEMPTS + 1):
+            try:
+                result = _categorize_one(chunk, api_key, timeout=timeout,
+                                         categories=categories, model=model,
+                                         part=(i + 1, total))
+                with lock:
+                    done += 1
+                    if progress_cb:
+                        try:
+                            progress_cb(done, total)
+                        except Exception:
+                            pass
+                return result
+            except AIError as e:
+                last_err = e
+                if attempt == CHUNK_ATTEMPTS:
+                    raise
+        raise last_err or AIError("AI не знайшов транзакцій у виписці.")
+
+    with ThreadPoolExecutor(max_workers=min(CHUNK_WORKERS, total)) as pool:
+        transactions: list[dict] = []
+        for result in pool.map(work, range(total), chunks):
+            transactions.extend(result)
+
+    if not transactions:
+        raise AIError("AI не знайшов транзакцій у виписці.")
+    return transactions
+
+
+def _categorize_one(text: str, api_key: str, *, timeout: int,
+                    categories: list[str] | None, model: str,
+                    part: tuple[int, int] | None = None) -> list[dict]:
+    """Один запит до DeepSeek для однієї частини виписки."""
+    user_content = text
+    if part and part[1] > 1:
+        user_content = (f"[Частина {part[0]} із {part[1]} банківської виписки — "
+                        f"оброби всі транзакції саме цієї частини]\n\n{text}")
+
     payload = {
         "model": model or DEEPSEEK_DEFAULT_MODEL,
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text[:15000]},
+            {"role": "system", "content": build_system_prompt(categories)},
+            {"role": "user", "content": user_content},
         ],
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
@@ -151,9 +255,8 @@ def categorize(text: str, api_key: str, *, timeout: int = 90,
     if parsed is None:
         raise AIError(f"AI повернув не JSON: {content[:200]}")
 
+    # Порожня частина — не помилка (могла містити лише підсумки/шапку)
     txs = parsed.get("transactions", [])
-    if not txs:
-        raise AIError("AI не знайшов транзакцій у виписці.")
 
     # Нормалізація кожної транзакції
     normalized = []
@@ -173,12 +276,14 @@ def categorize(text: str, api_key: str, *, timeout: int = 90,
     return normalized
 
 
-async def categorize_async(text: str, api_key: str, *, timeout: int = 90,
+async def categorize_async(text: str, api_key: str, *, timeout: int = 300,
                            categories: list[str] | None = None,
-                           model: str = "") -> list[dict]:
+                           model: str = "",
+                           progress_cb=None) -> list[dict]:
     """Async-обёртка над categorize(): не блокирует event loop."""
     return await asyncio.to_thread(categorize, text, api_key,
-                                   timeout=timeout, categories=categories, model=model)
+                                   timeout=timeout, categories=categories,
+                                   model=model, progress_cb=progress_cb)
 
 
 def _extract_json(content: str) -> dict | None:
