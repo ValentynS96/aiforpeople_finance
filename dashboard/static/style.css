@@ -859,3 +859,41 @@ body { font-size: 17px; }
 .admin-section .desc { font-size: 15px; }
 .admin-section h2 { font-size: 24px; }
 .secret-status { font-size: 14px; }
+
+/* ============================================================
+   Админка: навигация по разделам + тосты + статусы доступов
+   ============================================================ */
+.admin-nav {
+  position: sticky; top: 0; z-index: 60;
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 12px 0; margin-bottom: 12px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+.admin-nav a {
+  font-size: 13px; padding: 7px 13px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-secondary);
+  text-decoration: none; white-space: nowrap; transition: var(--t);
+}
+.admin-nav a:hover { border-color: var(--indigo); color: var(--text); }
+
+.admin-toast {
+  position: fixed; right: 20px; bottom: 20px; z-index: 200;
+  max-width: 420px; display: flex; gap: 12px; align-items: center;
+  padding: 14px 18px; border-radius: 14px;
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  border-left: 4px solid var(--green);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  animation: toast-in .35s ease;
+}
+.admin-toast.error { border-left-color: var(--red); }
+.admin-toast .close { cursor: pointer; color: var(--text-muted); font-size: 16px; }
+@keyframes toast-in { from { transform: translateY(16px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (max-width: 640px) { .admin-toast { left: 16px; right: 16px; max-width: none; } }
+
+.grant-scope {
+  font-size: 12px; font-weight: 500; padding: 3px 10px; border-radius: 999px;
+  display: inline-block; margin-bottom: 6px;
+}
+.grant-scope.multi { background: rgba(99,102,241,0.15); color: var(--indigo); }
+.grant-scope.single { background: rgba(245,158,11,0.15); color: var(--amber); }

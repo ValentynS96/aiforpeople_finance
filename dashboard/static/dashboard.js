@@ -367,3 +367,43 @@ async function clearChatHistory() {
     if (currentSessionId) selectSession(currentSessionId, document.getElementById('currentSessionTitle').textContent);
   } catch (e) { /* ignore */ }
 }
+
+// ============================================================
+// Перемикач рахунків (всі / конкретний) у шапці дашборда
+// ============================================================
+async function initAccountSwitcher() {
+  const sel = document.getElementById('accountSwitcher');
+  if (!sel) return;
+  try {
+    const [accResp, sessResp] = await Promise.all([
+      fetch('/api/accounts'), fetch('/api/session')
+    ]);
+    const accounts = (await accResp.json()).accounts || [];
+    const session = await sessResp.json();
+    if (accounts.length === 0) { sel.style.display = 'none'; return; }
+    const opts = [];
+    // агрегат «всі рахунки» — тільки коли рахунків декілька
+    if (accounts.length > 1) {
+      opts.push(`<option value="all">🏦 Всі рахунки (${accounts.length})</option>`);
+    }
+    for (const a of accounts) {
+      const label = `${a.iban_mask}${a.holder ? ' · ' + a.holder : ''} — ${a.tx_count} оп.`;
+      opts.push(`<option value="${a.iban}">${label}</option>`);
+    }
+    sel.innerHTML = opts.join('');
+    sel.value = (session.iban === 'all' && !opts.some(o => o.includes(`value="all"`)))
+      ? accounts[0].iban : (accounts.some(a => a.iban === session.iban) || session.iban === 'all'
+        ? session.iban : 'all');
+  } catch (e) { sel.style.display = 'none'; }
+}
+
+async function switchAccount(iban) {
+  try {
+    const r = await fetch('/api/set-account?iban=' + encodeURIComponent(iban));
+    const d = await r.json();
+    if (!d.ok) { alert(d.error || 'Не вдалося змінити рахунок'); return; }
+    location.reload();
+  } catch (e) { alert('Не вдалося зв\'язатись із сервером'); }
+}
+
+initAccountSwitcher();

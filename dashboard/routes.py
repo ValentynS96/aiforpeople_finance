@@ -127,27 +127,47 @@ def _detect_anomalies(metrics: dict) -> list[str]:
 # ============================================================
 @router.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
-    """Если IBAN-сессии нет → welcome. Иначе → дашборд.
-    Первый запуск (нет пароля админки) → setup-мастер."""
+    """Умная главная:
+    аноним → лендинг с входом по телефону;
+    клиент без выписок → онбординг с загрузкой (данные могли прийти из Telegram);
+    все остальные → дашборд."""
     if auth.is_setup_needed():
         return RedirectResponse("/setup", status_code=303)
     iban = auth.get_iban_session(request)
-    if not iban:
-        return templates.TemplateResponse(request, "welcome.html", {})
+    grant = _phone_user(request)
+    if not iban and auth.is_authed(request):
+        iban = "all"          # адмін без IBAN-сесії бачить усі рахунки
+    if not iban and not grant:
+        return templates.TemplateResponse(request, "welcome.html", {
+            "iban_login_allowed": bool(db.get_setting("allow_iban_login", False)),
+        })
+    # клієнт уперше в системі (виписки ще немає, зокрема з Telegram) → онбординг
+    if grant and not db.list_accounts(chat_id=grant["phone"]):
+        return templates.TemplateResponse(request, "welcome.html", {
+            "who": grant["label"] or db.mask_phone(grant["phone"]),
+            "show_upload": grant["level"] == "full",
+        })
     cats = db.get_setting("categories", [])
     from bot.iban import mask
     return templates.TemplateResponse(request, "dashboard.html", {
         "categories": cats,
         "stats": db.stats(),
-        "iban_mask": mask(iban),
+        "iban_mask": "всі рахунки" if iban == "all" else mask(iban),
         "iban": iban,
     })
 
 
 @router.post("/login-iban")
 async def login_iban(request: Request, iban: str = Form(...)):
-    """Устанавливает IBAN-сессию и редиректит в дашборд."""
+    """Устанавливает IBAN-сессию и редиректит в дашборд.
+
+    По умолчанию ВЫКЛЮЧЕН (данные клиентов нельзя открывать по чужому IBAN).
+    Включается в админке; админ может входить всегда."""
     from bot.iban import normalize, is_valid
+    if not auth.is_authed(request) and not db.get_setting("allow_iban_login", False):
+        return templates.TemplateResponse(request, "welcome.html", {
+            "error": "Вхід за IBAN вимкнено. Увійдіть за номером телефону.",
+        }, status_code=403)
     norm = normalize(iban)
     if not is_valid(norm):
         return templates.TemplateResponse(request, "welcome.html", {
@@ -162,6 +182,78 @@ async def login_iban(request: Request, iban: str = Form(...)):
 async def logout_iban():
     resp = RedirectResponse("/", status_code=303)
     auth.clear_iban_session(resp)
+    auth.clear_phone_session(resp)
+    return resp
+
+
+# ============================================================
+# Вход по номеру телефона (доступ выдаёт админ, без SMS)
+# ============================================================
+def _phone_user(request: Request) -> dict | None:
+    """Телефонная сессия + повторная проверка доступа в БД.
+
+    None — если сессии нет ИЛИ доступ отозван/истёк (тогда пользователь
+    фактически разлогинен, даже пока живёт cookie).
+    """
+    sess = auth.get_phone_session(request)
+    if not sess:
+        return None
+    grant = db.find_active_grant(sess["phone"])
+    if not grant:
+        return None
+    return grant
+
+
+def _client_single_iban(grant: dict) -> str:
+    """Єдиний дозволений IBAN клієнта без мультирахунку (перший за часом)."""
+    accs = db.list_accounts(chat_id=grant["phone"])
+    if not accs:
+        return ""
+    return sorted(accs, key=lambda a: a.get("first_seen") or "")[0]["iban"]
+
+
+def _data_scope(request: Request) -> tuple[str, str]:
+    """(iban-фильтр, chat_id-фильтр) для дата-эндпоинтов с учётом прав.
+
+    Клиент, вошедший по телефону: chat_id = его телефон → через JOIN accounts
+    видит ТОЛЬКО свои счета (даже если подменит cookie на чужой IBAN).
+    Без мультирахунку — форс першого рахунку (спільний дашборд заборонений).
+    Админ/владелец (IBAN-сессия): как задано — «all» или конкретный IBAN.
+    """
+    iban = auth.get_iban_session(request) or "all"
+    grant = _phone_user(request)
+    if grant:
+        if grant.get("multi_account"):
+            return iban, grant["phone"]
+        single = _client_single_iban(grant)
+        return (single or iban), grant["phone"]
+    return iban, ""
+
+
+@router.post("/login-phone")
+async def login_phone(request: Request, phone: str = Form(...)):
+    """Вход по номеру телефона: доступ должен быть выдан админом и не истечь."""
+    norm = db.normalize_phone(phone)
+    grant = db.find_active_grant(norm) if norm else None
+    if not grant:
+        # единое сообщение — не раскрываем, есть ли номер в системе
+        return templates.TemplateResponse(request, "welcome.html", {
+            "phone_error": "Доступ для цього номера не знайдено або строк минув. "
+                           "Зверніться до адміністратора.",
+        }, status_code=401)
+
+    resp = RedirectResponse("/", status_code=303)
+    auth.set_phone_session(resp, grant["phone"], grant["level"], "all")
+    # без мультирахунку — одразу фіксуюємо перший (єдиний видимий) рахунок
+    if grant.get("multi_account"):
+        auth.set_iban_session(resp, "all")
+    else:
+        auth.set_iban_session(resp, _client_single_iban(grant) or "all")
+    db.touch_grant_login(grant["id"])
+    db.log_usage(grant["label"] or db.mask_phone(grant["phone"]),
+                 "вхід за телефоном", source="web",
+                 details=f"{db.mask_phone(grant['phone'])} · "
+                         f"{db.GRANT_LEVELS.get(grant['level'], grant['level'])}")
     return resp
 
 
@@ -175,7 +267,7 @@ async def api_session(request: Request):
     from bot.iban import mask
     return {
         "iban": iban,
-        "iban_mask": mask(iban),
+        "iban_mask": "всі рахунки" if iban == "all" else mask(iban),
         "has_data": len(txs) > 0,
         "tx_count": len(txs),
     }
@@ -190,28 +282,31 @@ async def api_session(request: Request):
 @router.get("/api/chat/sessions")
 async def api_chat_sessions(request: Request):
     """Список бесед пользователя."""
-    iban = auth.get_iban_session(request)
-    if not iban:
+    _, ws = _data_scope(request)
+    key = ws or auth.get_iban_session(request)
+    if not key:
         return JSONResponse({"error": "Сесія закінчилась"}, status_code=401)
-    sessions = db.list_chat_sessions(iban)
+    sessions = db.list_chat_sessions(key)
     return {"sessions": sessions}
 
 
 @router.post("/api/chat/sessions")
 async def api_chat_session_create(request: Request):
     """Создать новую беседу."""
-    iban = auth.get_iban_session(request)
-    if not iban:
+    _, ws = _data_scope(request)
+    key = ws or auth.get_iban_session(request)
+    if not key:
         return JSONResponse({"error": "Сесія закінчилась"}, status_code=401)
-    sid = db.create_chat_session(iban)
+    sid = db.create_chat_session(key)
     return {"id": sid, "title": "Нова бесіда"}
 
 
 @router.patch("/api/chat/sessions/{session_id}")
 async def api_chat_session_rename(request: Request, session_id: int):
     """Переименовать беседу."""
-    iban = auth.get_iban_session(request)
-    if not iban:
+    _, ws = _data_scope(request)
+    key = ws or auth.get_iban_session(request)
+    if not key:
         return JSONResponse({"error": "Сесія закінчилась"}, status_code=401)
     import json as _json
     body = await request.body()
@@ -229,10 +324,11 @@ async def api_chat_session_rename(request: Request, session_id: int):
 @router.delete("/api/chat/sessions/{session_id}")
 async def api_chat_session_delete(request: Request, session_id: int):
     """Удалить беседу + её сообщения."""
-    iban = auth.get_iban_session(request)
-    if not iban:
+    _, ws = _data_scope(request)
+    key = ws or auth.get_iban_session(request)
+    if not key:
         return JSONResponse({"error": "Сесія закінчилась"}, status_code=401)
-    ok = db.delete_chat_session(session_id, iban)
+    ok = db.delete_chat_session(session_id, key)
     return {"ok": ok}
 
 
@@ -245,6 +341,17 @@ async def api_chat(request: Request):
     iban = auth.get_iban_session(request)
     if not iban:
         return JSONResponse({"error": "Сесія закінчилась. Увійдіть заново."}, status_code=401)
+
+    # доступ по телефону: чат вимагає рівень «перегляд + чат» або вище
+    pu = _phone_user(request)
+    if auth.get_phone_session(request) and not pu:
+        return JSONResponse({"error": "Доступ припинено. Зверніться до адміністратора."}, status_code=401)
+    if pu and pu["level"] not in ("chat", "full"):
+        return JSONResponse({"error": "Чат із ШІ у вашому доступі вимкнено (лише перегляд)."}, status_code=403)
+
+    # клиент по телефону → его личный кабинет (ключ = телефон); иначе IBAN
+    _, ws = _data_scope(request)
+    key = ws or iban
 
     body = await request.body()
     try:
@@ -259,30 +366,48 @@ async def api_chat(request: Request):
 
     # если session_id не задан — создаём новую беседу автоматически
     if not session_id:
-        session_id = db.create_chat_session(iban)
+        session_id = db.create_chat_session(key)
 
     api_key = db_bridge.get_deepseek_key()
     if not api_key:
         return JSONResponse({"error": "AI не налаштований (DeepSeek ключ). Зверніться до адміністратора."}, status_code=503)
 
     # сохраняем вопрос + история конкретной беседы
-    db.add_chat_message(iban, "user", message, session_id=session_id)
+    db.add_chat_message(key, "user", message, session_id=session_id)
     db.update_session_title_if_first(session_id, message)
-    history = db.get_chat_history(iban, limit=10, session_id=session_id)
-    summary = db_bridge.get_summary_by_iban(iban)
-    # RAG: ищем транзакции по словам вопроса (FTS5)
-    relevant = db_bridge.find_relevant(message, iban=iban)
+    history = db.get_chat_history(key, limit=10, session_id=session_id)
+    summary = (db_bridge.get_summary_for_user(ws)
+               if ws else db_bridge.get_summary_by_iban(iban))
+    # RAG: ищем транзакции по словам вопроса (FTS5); клиент — только свои счета
+    if ws:
+        relevant = db_bridge.find_relevant(message, chat_id=ws)
+    else:
+        relevant = db_bridge.find_relevant(message, iban=iban)
     system_prompt = ai.build_chat_system_prompt(summary, relevant=relevant)
 
     messages = [{"role": "system", "content": system_prompt}] + history
+    from bot.iban import mask
+    user = ((pu["label"] or db.mask_phone(pu["phone"])) if pu
+            else f"web · {mask(iban)}")
+    meta: dict = {}
     try:
         model = db_bridge.get_deepseek_model()
-        reply = await ai.chat_async(messages, api_key, model=model)
+        reply = await ai.chat_async(messages, api_key, model=model, usage_meta=meta)
     except ai.AIError as e:
         _log.error("веб-чат IBAN=%s: %s", iban, e)
+        db.log_usage(user, "чат (помилка)", source="web", ok=False,
+                     details=f"{message[:80]} · {str(e)[:120]}")
         return JSONResponse({"error": "AI тимчасово недоступний. Спробуйте пізніше."}, status_code=503)
 
-    db.add_chat_message(iban, "assistant", reply, session_id=session_id)
+    db.log_usage(user, "чат", source="web", model=meta.get("model", ""),
+                 api_calls=meta.get("api_calls", 0),
+                 prompt_tokens=meta.get("prompt_tokens", 0),
+                 completion_tokens=meta.get("completion_tokens", 0),
+                 cached_tokens=meta.get("cached_tokens", 0),
+                 seconds=meta.get("seconds", 0.0),
+                 details=f"питання: {message[:80]}")
+
+    db.add_chat_message(key, "assistant", reply, session_id=session_id)
     db.touch_session(session_id)
     return {"reply": reply, "session_id": session_id}
 
@@ -290,20 +415,22 @@ async def api_chat(request: Request):
 @router.get("/api/chat/history")
 async def api_chat_history(request: Request, session_id: int | None = None):
     """История чата. Если session_id — конкретная беседа."""
-    iban = auth.get_iban_session(request)
-    if not iban:
+    _, ws = _data_scope(request)
+    key = ws or auth.get_iban_session(request)
+    if not key:
         return JSONResponse({"error": "Сесія закінчилась"}, status_code=401)
-    history = db.get_chat_history(iban, limit=100, session_id=session_id)
+    history = db.get_chat_history(key, limit=100, session_id=session_id)
     return {"messages": history, "count": len(history)}
 
 
 @router.delete("/api/chat/history")
 async def api_chat_history_clear(request: Request, session_id: int | None = None):
     """Очистка истории чата. Если session_id — только этой беседы."""
-    iban = auth.get_iban_session(request)
-    if not iban:
+    _, ws = _data_scope(request)
+    key = ws or auth.get_iban_session(request)
+    if not key:
         return JSONResponse({"error": "Сесія закінчилась"}, status_code=401)
-    n = db.clear_chat_history(iban, session_id=session_id)
+    n = db.clear_chat_history(key, session_id=session_id)
     return {"cleared": n}
 
 
@@ -319,10 +446,21 @@ async def api_upload(request: Request):
     """
     import json as _json
 
+    # доступ по телефону: полный уровень — обязателен для загрузок
+    pu = _phone_user(request)
+    if auth.get_phone_session(request) and not pu:
+        return JSONResponse({"error": "Доступ припинено. Зверніться до адміністратора."}, status_code=401)
+    if pu and pu["level"] != "full":
+        return JSONResponse({"error": "Завантаження виписок доступне лише з повним доступом."}, status_code=403)
+
     # Читаем форму ДО создания StreamingResponse (тело запроса доступно только здесь)
     iban = auth.get_iban_session(request)
     if not iban:
         return JSONResponse({"error": "Сесія закінчилась. Увійдіть заново."}, status_code=401)
+
+    # кабинет: клиент по телефону → его телефон; иначе IBAN-сессия (владелец)
+    _, ws = _data_scope(request)
+    ws_id = ws or iban
 
     form = await request.form()
     upload = form.get("file")
@@ -366,11 +504,12 @@ async def api_upload(request: Request):
         yield send("step", {"step": "parse", "status": "done",
                             "message": f"✅ Розпізнано текст виписки"})
 
-        # --- ЭТАП 2: IBAN проверка ---
+        # --- ЭТАП 2: IBAN проверка (режим «всі рахунки» — без проверки) ---
         file_iban = extract_iban(markdown)
-        if file_iban and file_iban != iban:
+        if file_iban and iban != "all" and file_iban != iban:
             yield send("error", {"error": f"IBAN у файлі ({mask(file_iban)}) не збігається з вашим рахунком ({mask(iban)})"})
             return
+        target_iban = file_iban or (iban if iban != "all" else "")
 
         # --- ЭТАП 3: AI категоризация ---
         yield send("step", {"step": "ai", "status": "active",
@@ -387,9 +526,11 @@ async def api_upload(request: Request):
 
             # категоризація йде частинами — показуємо прогрес у стрімі
             box = {"done": 0, "total": 0}
+            meta: dict = {}
             task = asyncio.create_task(ai.categorize_async(
                 markdown, api_key, categories=categories, model=model,
-                progress_cb=lambda done, total: box.update(done=done, total=total)))
+                progress_cb=lambda done, total: box.update(done=done, total=total),
+                usage_meta=meta))
             while not task.done():
                 await asyncio.sleep(1)
                 if box["total"] > 1 and box["done"]:
@@ -405,10 +546,21 @@ async def api_upload(request: Request):
         yield send("step", {"step": "ai", "status": "done",
                             "message": f"✅ AI розібрав {len(transactions)} транзакцій"})
 
-        # --- ЭТАП 4: Сохранение ---
+        from bot.iban import mask as _mask_iban
+        ws_label = ((pu["label"] or db.mask_phone(pu["phone"])) if pu
+                    else f"web · {_mask_iban(target_iban or iban)}")
+        db.log_usage(ws_label, "загрузка виписки", source="web",
+                     model=meta.get("model", ""), api_calls=meta.get("api_calls", 0),
+                     prompt_tokens=meta.get("prompt_tokens", 0),
+                     completion_tokens=meta.get("completion_tokens", 0),
+                     cached_tokens=meta.get("cached_tokens", 0),
+                     seconds=meta.get("seconds", 0.0),
+                     details=f"{filename}: {len(transactions)} транзакцій")
+
+        # --- ЭТАП 4: Сохранение (в кабинет пользователя) ---
         yield send("step", {"step": "save", "status": "active",
                             "message": "💾 Зберігаю в базу даних..."})
-        db_bridge.save_result(transactions, chat_id=iban, username="(web)", iban=iban)
+        db_bridge.save_result(transactions, chat_id=ws_id, username=ws_label, iban=target_iban)
         yield send("step", {"step": "save", "status": "done",
                             "message": "✅ Збережено в дашборд"})
 
@@ -420,7 +572,7 @@ async def api_upload(request: Request):
                             "message": "✅ Експортовано" if sheets_ok else "⚠️ Експорт пропущено"})
 
         # --- ЭТАП 6: Метрики + финал ---
-        all_tx = db.get_transactions(iban=iban, limit=100000)
+        all_tx = db.get_transactions(iban=target_iban or "all", chat_id=ws, limit=100000)
         metrics = ai.compute_metrics(all_tx)
         thresholds = db_bridge.get_alert_thresholds()
         anomalies = ai.detect_anomalies(metrics, thresholds)
@@ -446,6 +598,22 @@ async def api_first_upload(request: Request):
     Запускает ФОНОВУЮ задачу и сразу возвращает job_id. Обработка не умирает
     при закрытии/перезагрузке страницы — статус смотрим через /api/job/{id}.
     """
+    # доступ по телефону: полный уровень — обязателен для загрузок
+    pu = _phone_user(request)
+    if auth.get_phone_session(request) and not pu:
+        return JSONResponse({"error": "Доступ припинено. Зверніться до адміністратора."}, status_code=401)
+    if pu and pu["level"] != "full":
+        return JSONResponse({"error": "Завантаження виписок доступне лише з повним доступом."}, status_code=403)
+    # анонимам загрузка запрещена: сначала войдите по телефону (или админ)
+    if not pu and not auth.is_authed(request) and not auth.get_iban_session(request):
+        return JSONResponse({"error": "Спочатку увійдіть за номером телефону."}, status_code=401)
+
+    # кабинет: клиент → телефон, админ → 'admin'
+    ws_id = (pu["phone"] if pu
+             else ("admin" if auth.is_authed(request) else auth.get_iban_session(request)))
+    ws_label = ((pu["label"] or db.mask_phone(pu["phone"])) if pu
+                else ("адмін" if ws_id == "admin" else "web"))
+
     import uuid as _uuid
 
     form = await request.form()
@@ -464,7 +632,8 @@ async def api_first_upload(request: Request):
     job_id = _uuid.uuid4().hex[:12]
     _jobs[job_id] = {"status": "running", "step": "parse", "message": f"📄 Розпізнаю файл: {filename}..."}
     _gc_jobs()
-    asyncio.create_task(_process_first_upload(job_id, content, filename))
+    asyncio.create_task(_process_first_upload(job_id, content, filename,
+                                              ws_id=ws_id, ws_label=ws_label))
     return {"job_id": job_id}
 
 
@@ -478,9 +647,13 @@ def _gc_jobs(max_jobs: int = 50):
         _jobs.pop(next(iter(_jobs)))
 
 
-async def _process_first_upload(job_id: str, content: bytes, filename: str):
+async def _process_first_upload(job_id: str, content: bytes, filename: str,
+                                ws_id: str = "", ws_label: str = ""):
     """Фоновая обработка первой выписки: парсинг → IBAN → AI → сохранение.
-    Обновляет _jobs[job_id] на каждом шаге. Переживает перезагрузку страницы."""
+    Обновляет _jobs[job_id] на каждом шаге. Переживает перезагрузку страницы.
+
+    ws_id — кабинет (телефон клиента / 'admin' / IBAN владельца),
+    ws_label — человекочитаемое имя для журнала статистики."""
     from bot import ai_engine as ai, db_bridge
     from bot.iban import extract_iban, mask
 
@@ -516,13 +689,22 @@ async def _process_first_upload(job_id: str, content: bytes, filename: str):
                        message=f"✅ Файл розпізнано · 🏦 Рахунок: {mask(iban)} · "
                                f"🧠 AI розносить транзакції: оброблено {done} з {total} частин...")
 
+        meta: dict = {}
         transactions = await ai.categorize_async(markdown, api_key,
                                                  categories=categories, model=model,
-                                                 progress_cb=ai_progress)
+                                                 progress_cb=ai_progress, usage_meta=meta)
         update(step="ai", message=f"✅ AI розібрав {len(transactions)} транзакцій")
+        db.log_usage(ws_label or "web", "загрузка виписки", source="web",
+                     model=meta.get("model", ""), api_calls=meta.get("api_calls", 0),
+                     prompt_tokens=meta.get("prompt_tokens", 0),
+                     completion_tokens=meta.get("completion_tokens", 0),
+                     cached_tokens=meta.get("cached_tokens", 0),
+                     seconds=meta.get("seconds", 0.0),
+                     details=f"{filename}: {len(transactions)} транзакцій")
 
         update(step="save", status="running", message="💾 Зберігаю...")
-        db_bridge.save_result(transactions, chat_id=iban, username="(web)", iban=iban)
+        db_bridge.save_result(transactions, chat_id=ws_id or iban,
+                              username=ws_label or "(web)", iban=iban)
         db_bridge.auto_export_to_sheets(transactions)
 
         update(status="done", step="save", iban=iban,
@@ -605,6 +787,8 @@ async def api_delete_data(request: Request):
 
     deleted = db.delete_iban_data(iban)
     _log.warning("Видалено дані IBAN=%s: %s", iban, deleted)
+    db.log_usage("адмін", "видалено дані рахунку", source="admin",
+                 details=f"{iban}: {deleted}")
     return {"ok": True, "deleted": deleted}
 
 
@@ -670,16 +854,136 @@ async def admin_save_model(request: Request, model: str = Form(...)):
         return redir
     from bot import db_bridge
     db_bridge.set_deepseek_model(model.strip())
+    db.log_usage("адмін", "змінено модель AI", source="admin",
+                 details=model.strip())
     return RedirectResponse("/admin#model", status_code=303)
+
+
+# ============================================================
+# Доступы по телефону (выдача/отзыв/продление)
+# ============================================================
+@router.post("/admin/grants")
+async def admin_create_grant(request: Request, phone: str = Form(...),
+                             label: str = Form(""), level: str = Form("view"),
+                             days: str = Form("30"),
+                             multi_account: bool = Form(False)):
+    """Выдаёт доступ-кабинет по номеру телефона. Повторная выдача = обновление."""
+    redir = auth.require_auth(request)
+    if redir:
+        return redir
+
+    norm = db.normalize_phone(phone)
+    if not norm:
+        db.log_usage("адмін", "помилка видачі доступу", source="admin", ok=False,
+                     details=f"некоректний номер: {phone[:30]}")
+        return _admin_back(False, f"Помилка: некоректний номер «{phone[:30]}»")
+    if level not in db.GRANT_LEVELS:
+        level = "view"
+    days_n = None if days in ("", "0", "none") else max(1, min(365, int(days)))
+
+    db.create_grant(norm, label.strip()[:60], level, "all", days_n,
+                    multi_account=multi_account)
+    db.log_usage("адмін", "видано доступ", source="admin",
+                 details=f"{label.strip() or db.mask_phone(norm)} · {db.mask_phone(norm)} · "
+                         f"{db.GRANT_LEVELS[level]} · "
+                         f"{'без строку' if days_n is None else str(days_n) + ' дн.'} · "
+                         f"{'мультирахунок' if multi_account else 'один рахунок'}")
+    return _admin_back(True, f"Доступ видано: {label.strip() or db.mask_phone(norm)} "
+                             f"({db.GRANT_LEVELS[level]}, "
+                             f"{'без строку' if days_n is None else str(days_n) + ' дн.'}, "
+                             f"{'🏦 всі рахунки' if multi_account else '🏦 один рахунок'})")
+
+
+def _admin_back(ok: bool, msg: str, anchor: str = "access") -> RedirectResponse:
+    """Редирект назад в админку с уведомлением (банер) о результате."""
+    from urllib.parse import quote
+    return RedirectResponse(f"/admin?ok={1 if ok else 0}&msg={quote(msg)}#{anchor}",
+                            status_code=303)
+
+
+@router.post("/admin/grants/{gid}/level")
+async def admin_grant_level(request: Request, gid: int, level: str = Form(...)):
+    """Зміна рівня прав уже виданого доступу."""
+    redir = auth.require_auth(request)
+    if redir:
+        return redir
+    if level not in db.GRANT_LEVELS:
+        db.log_usage("адмін", "помилка зміни рівня", source="admin",
+                     details=f"grant #{gid}: невідомий рівень «{level[:20]}»")
+        return _admin_back(False, f"Помилка: невідомий рівень «{level}»")
+    ok = db.set_grant_level(gid, level)
+    db.log_usage("адмін", "змінено рівень доступу" if ok else "помилка зміни рівня",
+                 source="admin",
+                 details=f"grant #{gid} → {db.GRANT_LEVELS[level]}")
+    if ok:
+        return _admin_back(True, f"Права доступу #{gid} змінено: {db.GRANT_LEVELS[level]}")
+    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
+
+
+@router.post("/admin/grants/{gid}/multi")
+async def admin_grant_multi(request: Request, gid: int, on: bool = Form(False)):
+    """Вмикає/вимикає мультирахунок (спільний дашборд по всіх рахунках)."""
+    redir = auth.require_auth(request)
+    if redir:
+        return redir
+    ok = db.set_grant_multi(gid, on)
+    db.log_usage("адмін", "мультирахунок " + ("увімкнено" if on else "вимкнено")
+                 if ok else "помилка перемикання мультирахунку",
+                 source="admin", details=f"grant #{gid}")
+    if ok:
+        return _admin_back(True, f"Мультирахунок для доступу #{gid} "
+                                 f"{'увімкнено' if on else 'вимкнено'}")
+    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
+
+
+@router.post("/admin/grants/{gid}/revoke")
+async def admin_revoke_grant(request: Request, gid: int):
+    redir = auth.require_auth(request)
+    if redir:
+        return redir
+    ok = db.revoke_grant(gid)
+    db.log_usage("адмін", "доступ відкликано" if ok else "помилка відкликання",
+                 source="admin", details=f"grant #{gid}")
+    if ok:
+        return _admin_back(True, f"Доступ #{gid} відкликано")
+    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
+
+
+@router.post("/admin/grants/{gid}/extend")
+async def admin_extend_grant(request: Request, gid: int, days: int = 30):
+    redir = auth.require_auth(request)
+    if redir:
+        return redir
+    days = max(1, min(365, days))
+    ok = db.extend_grant(gid, days)
+    db.log_usage("адмін", "доступ продовжено" if ok else "помилка продовження",
+                 source="admin", details=f"grant #{gid} +{days} дн.")
+    if ok:
+        return _admin_back(True, f"Доступ #{gid} продовжено на {days} дн.")
+    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
+
+
+@router.post("/admin/iban-login-toggle")
+async def admin_iban_login_toggle(request: Request, enabled: bool = Form(False)):
+    """Переключає вхід за IBAN без доступу (за замовчуванням вимкнений)."""
+    redir = auth.require_auth(request)
+    if redir:
+        return redir
+    db.set_setting("allow_iban_login", bool(enabled))
+    db.log_usage("адмін", "перемикач входу за IBAN", source="admin",
+                 details="увімкнено" if enabled else "вимкнено")
+    return _admin_back(enabled, "Вхід за IBAN увімкнено" if enabled else "Вхід за IBAN вимкнено")
 
 
 @router.get("/api/metrics")
 async def api_metrics(request: Request, date_from: str = "", date_to: str = "",
                       category: str = "all", month: str = "", year: str = ""):
     """KPI + графики. Автофильтр по IBAN + период (месяц/год)."""
-    iban = auth.get_iban_session(request) or "all"
+    if auth.get_phone_session(request) and not _phone_user(request):
+        return JSONResponse({"error": "Доступ припинено"}, status_code=401)
+    iban, ws = _data_scope(request)
     txs = db.get_transactions(date_from=date_from, date_to=date_to,
-                              category=category, iban=iban,
+                              category=category, iban=iban, chat_id=ws,
                               month=month, year=year, limit=10000)
     metrics = _aggregate(txs)
     metrics["alerts"] = _detect_anomalies(metrics)
@@ -691,10 +995,15 @@ async def api_transactions(request: Request, date_from: str = "", date_to: str =
                            category: str = "all", month: str = "", year: str = "",
                            q: str = "", limit: int = 100):
     """Таблица транзакций. Автофильтр по IBAN + период + полнотекстовый поиск (q)."""
-    iban = auth.get_iban_session(request) or "all"
+    iban, ws = _data_scope(request)
+    # доп. фильтр «только свои счета» нужен в режиме агрегата («all»)
+    my_ibans = ({a["iban"] for a in db.list_accounts(chat_id=ws)}
+                if ws and iban == "all" else None)
     if q.strip():
         # FTS5-поиск; категория/период дополнительно фильтруем в Python (мало строк)
         txs = db.search_transactions(q, iban=iban, limit=500)
+        if my_ibans is not None:
+            txs = [t for t in txs if t.get("iban") in my_ibans]
         if category and category != "all":
             txs = [t for t in txs if t.get("category") == category]
         if month:
@@ -703,7 +1012,7 @@ async def api_transactions(request: Request, date_from: str = "", date_to: str =
             txs = [t for t in txs if (t.get("date") or "").startswith(year)]
         return txs[:limit]
     return db.get_transactions(date_from=date_from, date_to=date_to,
-                               category=category, iban=iban,
+                               category=category, iban=iban, chat_id=ws,
                                month=month, year=year, limit=limit)
 
 
@@ -715,15 +1024,16 @@ async def api_chat_search(request: Request, q: str = ""):
         return JSONResponse({"error": "Сесія закінчилась"}, status_code=401)
     if not q.strip():
         return {"results": [], "count": 0}
-    results = db.search_chat(q, chat_id=iban)
+    _, ws = _data_scope(request)
+    results = db.search_chat(q, chat_id=ws or iban)
     return {"results": results, "count": len(results)}
 
 
 @router.get("/api/periods")
 async def api_periods(request: Request):
     """Доступные месяцы и годы для переключателя периодов."""
-    iban = auth.get_iban_session(request) or "all"
-    return db.get_periods(iban=iban)
+    iban, ws = _data_scope(request)
+    return db.get_periods(iban=iban, chat_id=ws)
 
 
 @router.get("/api/categories")
@@ -732,10 +1042,19 @@ async def api_categories():
 
 
 @router.get("/api/accounts")
-async def api_accounts():
-    """Список счетов с метриками — для dropdown фильтра IBAN на дашборде."""
+async def api_accounts(request: Request):
+    """Список счетов с метриками — для перемикача рахунків на дашборді.
+
+    Клиент видит только свои; без мультирахунку — лише один (перший) рахунок."""
     from bot.iban import mask
-    accounts = db.account_stats()
+    grant = _phone_user(request)
+    if grant:
+        accounts = db.account_stats(chat_id=grant["phone"])
+        if not grant.get("multi_account"):
+            single = _client_single_iban(grant)
+            accounts = [a for a in accounts if a["iban"] == single]
+    else:
+        accounts = db.account_stats()
     result = []
     for a in accounts:
         result.append({
@@ -749,11 +1068,37 @@ async def api_accounts():
     return {"accounts": result}
 
 
+@router.get("/api/set-account")
+async def api_set_account(request: Request, iban: str):
+    """Перемикає рахунок дашборда (cookie) — з перевіркою прав доступу."""
+    if iban != "all":
+        from bot.iban import normalize, is_valid
+        iban = normalize(iban)
+        if not is_valid(iban):
+            return JSONResponse({"ok": False, "error": "Невірний IBAN"}, status_code=400)
+    grant = _phone_user(request)
+    if grant:
+        if iban == "all":
+            if not grant.get("multi_account"):
+                return JSONResponse({"ok": False,
+                                     "error": "Мультирахунок вимкнено у вашому доступі"}, status_code=403)
+        else:
+            my = {a["iban"] for a in db.list_accounts(chat_id=grant["phone"])}
+            if iban not in my:
+                return JSONResponse({"ok": False, "error": "Це не ваш рахунок"}, status_code=403)
+    resp = JSONResponse({"ok": True})
+    auth.set_iban_session(resp, iban)
+    return resp
+
+
 @router.get("/api/attach-iban")
-async def api_attach_iban(iban: str):
+async def api_attach_iban(request: Request, iban: str):
     """Ставит IBAN-сессию по параметру (после первой загрузки виписки).
     Вызывается JS-ом после успешного /api/first-upload."""
     from bot.iban import normalize, is_valid
+    if (not auth.is_authed(request) and not _phone_user(request)
+            and not db.get_setting("allow_iban_login", False)):
+        return JSONResponse({"ok": False, "error": "Вхід за IBAN вимкнено"}, status_code=403)
     norm = normalize(iban)
     if not is_valid(norm):
         return JSONResponse({"ok": False, "error": "Невірний IBAN"}, status_code=400)
@@ -832,7 +1177,10 @@ async def admin_login_page(request: Request):
 @router.post("/admin/login")
 async def admin_login_submit(request: Request, password: str = Form(...)):
     resp = RedirectResponse("/admin", status_code=303)
-    if auth.login(resp, password):
+    ok = auth.login(resp, password)
+    db.log_usage("адмін", "вхід в адмінку", source="admin", ok=ok,
+                 details="пароль прийнято" if ok else "невірний пароль")
+    if ok:
         return resp
     return templates.TemplateResponse(request, "admin_login.html", {
         "error": "Невірний пароль",
@@ -880,6 +1228,15 @@ async def admin_page(request: Request):
         "secret_status": _secret_status(),
         "stats": db.stats(),
         "next_report_run": next_report_run,
+        "usage_totals": db.usage_totals(),
+        "usage_by_user": db.usage_by_user(),
+        "usage_recent": db.usage_recent(50),
+        "grants": db.list_grants(),
+        "grant_levels": db.GRANT_LEVELS,
+        "accounts": db.account_stats(),
+        "allow_iban_login": bool(db.get_setting("allow_iban_login", False)),
+        "notice": request.query_params.get("msg", ""),
+        "notice_ok": request.query_params.get("ok", "1") == "1",
     })
 
 
@@ -943,6 +1300,10 @@ async def admin_save_secrets(request: Request,
         import asyncio as _a
         from server import runtime
         _a.get_event_loop().create_task(runtime.restart_bot())
+    db.log_usage("адмін", "оновлено ключі API", source="admin",
+                 details=", ".join(filter(None, [
+                     "DeepSeek" if deepseek_key.strip() else "",
+                     "Telegram" if telegram_token.strip() else ""])) or "—")
     return RedirectResponse("/admin#secrets", status_code=303)
 
 

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Адмінка — AI замість фінансиста</title>
-<link rel="stylesheet" href="/static/style.css?v=6">
+<link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
 <div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
@@ -18,12 +18,245 @@
     </div>
   </div>
 
-  <p style="color:var(--text-muted);font-size:13px;margin-bottom:24px;">
+  <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;">
     Транзакцій у БД: <strong style="color:var(--text)">{{ stats.transactions }}</strong> ·
     Сесій: <strong style="color:var(--text)">{{ stats.sessions }}</strong>
   </p>
 
-  <!-- 1. ПОРОГИ АЛЕРТОВ -->
+  {% if notice %}
+  <div id="adminNotice" class="admin-toast {% if not notice_ok %}error{% endif %}">
+    <span>{% if notice_ok %}✅{% else %}❌{% endif %} {{ notice }}</span>
+    <span class="close" onclick="document.getElementById('adminNotice').remove()">✕</span>
+  </div>
+  <script>
+    // прибираємо msg з адреси, щоб F5 не показував уведомлення повторно
+    history.replaceState(null, '', location.pathname + (location.hash || ''));
+    setTimeout(() => { const n = document.getElementById('adminNotice');
+      if (n) { n.style.transition = 'opacity .5s'; n.style.opacity = '0';
+      setTimeout(() => n.remove(), 600); } }, 5000);
+  </script>
+  {% endif %}
+
+  <!-- НАВІГАЦІЯ ПО РОЗДІЛАХ -->
+  <nav class="admin-nav">
+    <a href="#access">👤 Доступи</a>
+    <a href="#usage">📊 Статистика</a>
+    <a href="#secrets">🔑 Ключі API</a>
+    <a href="#model">🧠 Модель AI</a>
+    <a href="#categories">🏷️ Категорії</a>
+    <a href="#thresholds">🚨 Пороги</a>
+    <a href="#sheets">📋 Google Sheets</a>
+    <a href="#history">📜 Історія</a>
+    <a href="#automations">📅 Автоматизації</a>
+    <a href="#data-mgmt">⚠️ Дані</a>
+  </nav>
+
+  <!-- ДОСТУПЫ ПО ТЕЛЕФОНУ -->
+  <div class="admin-section" id="access">
+    <h2>👤 Доступи за телефоном</h2>
+    <p class="desc">
+      Видайте доступ за номером телефону — людина вводить його на головній сторінці
+      і потрапляє в дашборд. Без паролів і SMS. Відкликання діє одразу.
+    </p>
+
+    <form method="post" action="/admin/grants" style="margin-bottom:22px;">
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Номер телефону</label>
+          <input type="tel" name="phone" placeholder="+380 67 123 45 67" required>
+        </div>
+        <div class="form-row">
+          <label>Ім'я (для статистики)</label>
+          <input type="text" name="label" placeholder="Напр. Олена">
+        </div>
+        <div class="form-row">
+          <label>Рівень доступу</label>
+          <select name="level">
+            <option value="view">👀 Перегляд дашборда</option>
+            <option value="chat" selected>👀+💬 Перегляд + чат із ШІ</option>
+            <option value="full">🔓 Повний (чат + завантаження виписок)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Строк дії</label>
+          <select name="days">
+            <option value="1">1 день</option>
+            <option value="7">7 днів</option>
+            <option value="30" selected>30 днів</option>
+            <option value="90">90 днів</option>
+            <option value="">Без строку</option>
+          </select>
+        </div>
+        <div class="form-row" style="grid-column:1/-1;">
+          <div class="checkbox-row">
+            <input type="checkbox" name="multi_account" id="multiAccount" checked>
+            <label for="multiAccount">🏦 Мультирахунок — спільний дашборд по всіх рахунках клієнта
+              <span class="hint">(платна опція; без неї клієнт бачить лише перший рахунок)</span></label>
+          </div>
+        </div>
+        <div class="form-row" style="align-self:end;">
+          <button class="btn" type="submit" style="width:100%;justify-content:center;">➕ Видати доступ</button>
+        </div>
+      </div>
+    </form>
+
+    {% if grants %}
+    <table class="session-table">
+      <thead><tr><th>Телефон</th><th>Ім'я</th><th>Права</th><th>Рахунки</th><th>Telegram</th>
+        <th>Діє до (Київ)</th><th>Статус</th><th>Вхід</th><th></th></tr></thead>
+      <tbody>
+        {% for g in grants %}
+        <tr>
+          <td>{{ g.phone[:6] }}•••{{ g.phone[-2:] }}</td>
+          <td>{{ g.label or '—' }}</td>
+          <td>
+            <form method="post" action="/admin/grants/{{ g.id }}/level" style="display:inline-flex;gap:4px;align-items:center;">
+              <select name="level" style="padding:4px 6px;border-radius:8px;
+                      background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);">
+                <option value="view" {% if g.level == 'view' %}selected{% endif %}>👀 перегляд</option>
+                <option value="chat" {% if g.level == 'chat' %}selected{% endif %}>👀+💬 з чатом</option>
+                <option value="full" {% if g.level == 'full' %}selected{% endif %}>🔓 повний</option>
+              </select>
+              <button class="btn secondary small" type="submit" title="Зберегти рівень">💾</button>
+            </form>
+          </td>
+          <td>
+            {% if g.multi_account %}
+            <span class="grant-scope multi">🏦 Всі рахунки</span><br>
+            <form method="post" action="/admin/grants/{{ g.id }}/multi" style="display:inline;">
+              <input type="hidden" name="on" value="0">
+              <button class="btn secondary small" type="submit"
+                      title="Залишити клієнту лише перший рахунок">
+                → обмежити одним
+              </button>
+            </form>
+            {% else %}
+            <span class="grant-scope single">1️⃣ Лише перший рахунок</span><br>
+            <form method="post" action="/admin/grants/{{ g.id }}/multi" style="display:inline;">
+              <input type="hidden" name="on" value="1">
+              <button class="btn secondary small" type="submit"
+                      title="Дозволити бачити всі рахунки в одному дашборді">
+                → дозволити всі
+              </button>
+            </form>
+            {% endif %}
+          </td>
+          <td>{% if g.telegram_chat_id %}✅ прив'язаний{% else %}—{% endif %}</td>
+          <td>{{ g.expires_kyiv or 'без строку' }}</td>
+          <td>{% if g.status == 'active' %}<span style="color:var(--green);">● активний</span>
+              {% elif g.status == 'expired' %}<span style="color:var(--orange, #e6a23c);">● строк минув</span>
+              {% else %}<span style="color:var(--red);">● відкликано</span>{% endif %}</td>
+          <td title="{{ g.last_login_at or '' }}">{{ g.login_count }} · {{ g.last_login_kyiv or 'ще не входив' }}</td>
+          <td style="white-space:nowrap;">
+            {% if g.status != 'revoked' %}
+            <form method="post" action="/admin/grants/{{ g.id }}/revoke" style="display:inline;">
+              <button class="btn secondary small" type="submit">✖ Відкликати</button>
+            </form>
+            {% endif %}
+            <form method="post" action="/admin/grants/{{ g.id }}/extend" style="display:inline;">
+              <input type="hidden" name="days" value="30">
+              <button class="btn secondary small" type="submit">+30 дн.</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><div class="icon">🔓</div>Доступів ще не видано — заповніть форму вище</div>
+    {% endif %}
+
+    <form method="post" action="/admin/iban-login-toggle" style="margin-top:20px;
+          padding-top:16px;border-top:1px solid var(--border);">
+      <div class="checkbox-row">
+        <input type="checkbox" name="enabled" id="ibanLogin" {% if allow_iban_login %}checked{% endif %}>
+        <label for="ibanLogin">Дозволити вхід за IBAN без доступу (демо-режим).
+          <span class="hint">У вимкненому стані (рекомендовано) дані доступні лише
+          за номером телефону або паролем адміністратора.</span></label>
+      </div>
+      <button class="btn secondary small" type="submit">Зберегти</button>
+    </form>
+  </div>
+
+  <!-- СТАТИСТИКА ВИКОРИСТАННЯ -->
+  <div class="admin-section" id="usage">
+    <h2>📊 Статистика використання</h2>
+    <p class="desc">Дії користувачів у системі та витрачені токени AI.</p>
+
+    <div class="kpi-grid" style="margin-bottom:20px;">
+      <div class="kpi-card">
+        <div class="kpi-label">Дій у журналі</div>
+        <div class="kpi-value">{{ usage_totals.actions }}</div>
+        <div class="kpi-sub">чат · загрузки · входи · адмін-операції</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Запитів до DeepSeek</div>
+        <div class="kpi-value">{{ usage_totals.api_calls }}</div>
+        <div class="kpi-sub">включно з повторними спробами</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Токени промпт / відповідей</div>
+        <div class="kpi-value">{{ "{:,}".format(usage_totals.prompt_tokens).replace(",", " ") }} /
+          {{ "{:,}".format(usage_totals.completion_tokens).replace(",", " ") }}</div>
+        <div class="kpi-sub">кеш-хіти: {{ "{:,}".format(usage_totals.cached_tokens).replace(",", " ") }}
+          (безкоштовні)</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Середній час запиту</div>
+        <div class="kpi-value">{{ "%.1f"|format(usage_totals.avg_seconds) }} с</div>
+        <div class="kpi-sub">по всіх AI-операціях</div>
+      </div>
+    </div>
+
+    {% if usage_by_user %}
+    <h3 style="margin:18px 0 8px;font-size:15px;">По користувачах</h3>
+    <table class="session-table">
+      <thead><tr><th>Користувач</th><th>Остання активність</th><th>Дій</th>
+        <th>API-запитів</th><th>Токенів</th><th>З них кеш</th></tr></thead>
+      <tbody>
+        {% for u in usage_by_user %}
+        <tr>
+          <td>{{ u.user }}</td>
+          <td>{{ u.last_ts_kyiv }}</td>
+          <td>{{ u.actions }}</td>
+          <td>{{ u.api_calls }}</td>
+          <td>{{ "{:,}".format(u.tokens).replace(",", " ") }}</td>
+          <td>{{ "{:,}".format(u.cached_tokens).replace(",", " ") }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if usage_recent %}
+    <h3 style="margin:18px 0 8px;font-size:15px;">Останні дії (50)</h3>
+    <table class="session-table">
+      <thead><tr><th>Час (Київ)</th><th>Користувач</th><th>Дія</th><th>Модель</th>
+        <th>API</th><th>Токени</th><th>Час, с</th><th>Деталі</th></tr></thead>
+      <tbody>
+        {% for r in usage_recent %}
+        <tr {% if not r.ok %}style="color:var(--red);"{% endif %}>
+          <td>{{ r.ts_kyiv }}</td>
+          <td>{{ r.user }}</td>
+          <td>{{ r.action }}</td>
+          <td>{{ r.model or '—' }}</td>
+          <td>{{ r.api_calls or '' }}</td>
+          <td>{% if r.prompt_tokens or r.completion_tokens %}
+              {{ "{:,}".format(r.prompt_tokens).replace(",", " ") }} +
+              {{ "{:,}".format(r.completion_tokens).replace(",", " ") }}{% else %}—{% endif %}</td>
+          <td>{{ "%.1f"|format(r.seconds) if r.seconds else '—' }}</td>
+          <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+              title="{{ r.details }}">{{ r.details or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state"><div class="icon">📭</div>Журнал поки порожній — поспілкуйтеся зі ШІ або завантажте виписку</div>
+    {% endif %}
+  </div>
+
+  <!-- ПОРОГИ АЛЕРТОВ -->
   <div class="admin-section" id="thresholds">
     <h2>🚨 Пороги алертів</h2>
     <p class="desc">Зміна порогів одразу впливає на аналіз наступних виписок (без перезапуску).</p>
@@ -33,28 +266,38 @@
                {% if thresholds.cash_gap_enabled %}checked{% endif %}>
         <label for="cg">Касовий розрив (прибуток &lt; 0)</label>
       </div>
+      <p class="hint" style="margin:-8px 0 16px 28px;">
+        Тривога, якщо за період витрати перевищили дохід (прибуток &lt; 0).
+        Розрахунок: дохід мінус витрати за всіма транзакціями періоду.
+      </p>
       <div class="form-grid">
         <div class="form-row">
           <label>Перевитрата категорії, % витрат</label>
           <input type="number" name="category_share_pct" min="1" max="100" step="1"
                  value="{{ thresholds.category_share_pct }}">
+          <span class="hint">Тривога, якщо одна категорія (напр. реклама) займає ≥ 30% усіх витрат.
+            Розрахунок: витрати категорії ÷ загальні витрати × 100.</span>
         </div>
         <div class="form-row">
           <label>Податки × середнього</label>
-          <input type="number" name="taxes_multiplier" min="1" step="0.5"
+          <input type="number" name="taxes_multiplier" min="1" max="10" step="0.5"
                  value="{{ thresholds.taxes_multiplier }}">
+          <span class="hint">Тривога, якщо податки ≥ 3× середньої категорії витрат.
+            Розрахунок: витрати на податки ÷ (загальні витрати ÷ кількість категорій).</span>
         </div>
         <div class="form-row">
           <label>Зарплати % виручки</label>
           <input type="number" name="salary_income_pct" min="1" max="200" step="1"
                  value="{{ thresholds.salary_income_pct }}">
+          <span class="hint">Тривога, якщо зарплати з'їдають ≥ 80% доходу.
+            Розрахунок: витрати на зарплати ÷ дохід × 100.</span>
         </div>
       </div>
       <button class="btn small" type="submit">Зберегти пороги</button>
     </form>
   </div>
 
-  <!-- 2. КАТЕГОРИИ -->
+  <!-- КАТЕГОРИИ -->
   <div class="admin-section" id="categories">
     <h2>🏷️ Категорії</h2>
     <p class="desc">По одній на рядок. Порядок зберігається. AI буде використовувати цей список.</p>
@@ -67,7 +310,7 @@
     </form>
   </div>
 
-  <!-- 2б. МОДЕЛЬ AI -->
+  <!-- МОДЕЛЬ AI -->
   <div class="admin-section" id="model">
     <h2>🧠 Модель AI</h2>
     <p class="desc">Яка модель DeepSeek обробляє виписки й відповідає в чаті. Список тягнеться актуальний з API.</p>
@@ -86,7 +329,7 @@
     <span id="modelStatus" style="margin-left:12px;font-size:13px;"></span>
   </div>
 
-  <!-- 3. КЛЮЧИ API -->
+  <!-- КЛЮЧИ API -->
   <div class="admin-section" id="secrets">
     <h2>🔑 Ключі API</h2>
     <p class="desc">Зберігаються зашифрованими. Заповнюйте тільки те, що хочете змінити — порожнє поле не затирає.</p>
@@ -162,7 +405,7 @@
     {% endif %}
   </div>
 
-  <!-- 5. ИСТОРИЯ ЗАГРУЗОК -->
+  <!-- ИСТОРИЯ ЗАГРУЗОК -->
   <div class="admin-section" id="history">
     <h2>📜 Історія завантажень</h2>
     <p class="desc">Хто і коли завантажував виписки через бота.</p>
@@ -185,7 +428,7 @@
     {% endif %}
   </div>
 
-  <!-- 6. АВТОМАТИЗАЦІЇ (планировщик отчётов) -->
+  <!-- АВТОМАТИЗАЦІЇ (планировщик отчётов) -->
   <div class="admin-section" id="automations">
     <h2>📅 Автоматизації</h2>
     <p class="desc">
@@ -196,7 +439,7 @@
     <span id="reportResult" style="margin-left:12px;font-size:13px;"></span>
   </div>
 
-  <!-- 7. КЕРУВАННЯ ДАНИМИ (удаление по IBAN) -->
+  <!-- КЕРУВАННЯ ДАНИМИ -->
   <div class="admin-section danger-zone" id="data-mgmt">
     <div class="danger-header"><h2 style="margin:0;">⚠️ Керування даними</h2></div>
     <div class="danger-body">

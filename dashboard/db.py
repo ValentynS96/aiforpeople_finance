@@ -17,8 +17,9 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from dashboard.crypto import decrypt, encrypt
@@ -289,6 +290,35 @@ def init_db():
                 updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_chat_sessions ON chat_sessions(chat_id);
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                TEXT NOT NULL DEFAULT (datetime('now')),
+                user              TEXT NOT NULL,
+                source            TEXT NOT NULL DEFAULT 'web',
+                action            TEXT NOT NULL,
+                model             TEXT DEFAULT '',
+                api_calls         INTEGER DEFAULT 0,
+                prompt_tokens     INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                cached_tokens     INTEGER DEFAULT 0,
+                seconds           REAL DEFAULT 0,
+                ok                INTEGER DEFAULT 1,
+                details           TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts);
+            CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_log(user);
+            CREATE TABLE IF NOT EXISTS access_grants (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone         TEXT NOT NULL UNIQUE,
+                label         TEXT NOT NULL DEFAULT '',
+                level         TEXT NOT NULL DEFAULT 'view',
+                scope         TEXT NOT NULL DEFAULT 'all',
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                expires_at    TEXT,
+                revoked       INTEGER NOT NULL DEFAULT 0,
+                login_count   INTEGER NOT NULL DEFAULT 0,
+                last_login_at TEXT
+            );
         """)
         # --- миграции (добавляем колонки, если их ещё нет; идемпотентно) ---
         _add_column_if_missing(conn, "transactions", "iban", "TEXT")
@@ -298,6 +328,10 @@ def init_db():
         _add_column_if_missing(conn, "sheets_config", "credentials_json", "TEXT")
         _add_column_if_missing(conn, "chat_history", "session_id", "INTEGER")
         _try_create_index(conn, "idx_chat_session", "chat_history(session_id)")
+        _add_column_if_missing(conn, "access_grants", "telegram_chat_id", "TEXT")
+        _try_create_index(conn, "idx_grants_tg", "access_grants(telegram_chat_id)")
+        # мультирахунок: спільний дашборд по всіх рахунках клієнта (платна опція)
+        _add_column_if_missing(conn, "access_grants", "multi_account", "INTEGER NOT NULL DEFAULT 1")
         # дефолтные настройки (только если пусто)
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute(
@@ -492,11 +526,17 @@ def get_counterparties(iban: str = "", limit: int = 60) -> list[dict]:
         ]
 
 
-def get_periods(iban: str = "") -> dict:
-    """Доступные месяцы и годы из БД (для dropdown переключателя)."""
+def get_periods(iban: str = "", chat_id: str = "") -> dict:
+    """Доступные месяцы и годы из БД (для dropdown переключателя).
+
+    chat_id — кабинет клиента (телефон): только его счета.
+    """
     sql = "SELECT DISTINCT substr(date,1,7) as ym FROM transactions WHERE date IS NOT NULL AND length(date) >= 7"
     params: list = []
-    if iban and iban != "all":
+    if chat_id:
+        sql += " AND iban IN (SELECT iban FROM accounts WHERE chat_id = ?)"
+        params.append(chat_id)
+    elif iban and iban != "all":
         sql += " AND iban = ?"
         params.append(iban)
     sql += " ORDER BY ym"
@@ -887,3 +927,310 @@ def clear_chat_history(chat_id: str, session_id: int | None = None) -> int:
         else:
             cur = conn.execute("DELETE FROM chat_history WHERE chat_id = ?", (chat_id,))
         return cur.rowcount
+
+
+# ============================================================
+# Журнал использования (действия + токены AI) — для админки
+# ============================================================
+def log_usage(user: str, action: str, *, source: str = "web", model: str = "",
+              api_calls: int = 0, prompt_tokens: int = 0, completion_tokens: int = 0,
+              cached_tokens: int = 0, seconds: float = 0.0, ok: bool = True,
+              details: str = ""):
+    """Логирует действие пользователя (чат, загрузка, вход, админ-операция).
+
+    Статистика не должна валить основной поток — все ошибки глотаются.
+    """
+    try:
+        with _lock, get_conn() as conn:
+            conn.execute(
+                """INSERT INTO usage_log(user, source, action, model, api_calls,
+                                         prompt_tokens, completion_tokens,
+                                         cached_tokens, seconds, ok, details)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user, source, action, model, api_calls,
+                 prompt_tokens, completion_tokens, cached_tokens,
+                 round(seconds, 2), 1 if ok else 0, details[:500]),
+            )
+    except Exception:
+        pass
+
+
+def usage_totals() -> dict:
+    """Сводка по всему журналу: действия, API-запросы, токены, среднее время."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*) AS actions,
+                   COALESCE(SUM(api_calls), 0)         AS api_calls,
+                   COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(cached_tokens), 0)     AS cached_tokens,
+                   COALESCE(AVG(NULLIF(seconds, 0)), 0) AS avg_seconds
+            FROM usage_log
+        """).fetchone()
+        return dict(row)
+
+
+def usage_by_user(limit: int = 20) -> list[dict]:
+    """Агрегация по пользователям: активность и токены, сортировка по свежести."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT user,
+                   MAX(ts) AS last_ts,
+                   COUNT(*) AS actions,
+                   COALESCE(SUM(api_calls), 0) AS api_calls,
+                   COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens,
+                   COALESCE(SUM(cached_tokens), 0) AS cached_tokens
+            FROM usage_log
+            GROUP BY user
+            ORDER BY last_ts DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        result = [dict(r) for r in rows]
+    for r in result:
+        r["last_ts_kyiv"] = human_kyiv(r.get("last_ts"))
+    return result
+
+
+def usage_recent(limit: int = 50) -> list[dict]:
+    """Последние N записей журнала (свежие сверху)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT ts, user, source, action, model, api_calls, prompt_tokens,
+                      completion_tokens, cached_tokens, seconds, ok, details
+               FROM usage_log ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        result = [dict(r) for r in rows]
+    for r in result:
+        r["ts_kyiv"] = utc_to_kyiv(r.get("ts"), "%d.%m %H:%M")
+    return result
+
+
+# ============================================================
+# Доступы по телефону (выдаёт/отзывает админ)
+# ============================================================
+GRANT_LEVELS = {"view": "перегляд", "chat": "перегляд + чат", "full": "повний"}
+
+
+def normalize_phone(raw: str) -> str:
+    """Приводит телефон к формату +380XXXXXXXXX. Пусто — если не похож на укр. номер."""
+    import re
+    digits = re.sub(r"\D", "", raw or "")
+    if digits.startswith("380") and len(digits) == 12:
+        return "+" + digits
+    if digits.startswith("80") and len(digits) == 11:
+        return "+3" + digits
+    if len(digits) == 10 and digits.startswith("0"):
+        return "+380" + digits[1:]      # 0671234567 → +380671234567
+    if len(digits) == 9:
+        return "+380" + digits
+    return ""
+
+
+def mask_phone(phone: str) -> str:
+    """+380671234567 → +38067•••67 (для отображения в админке)."""
+    return f"{phone[:6]}•••{phone[-2:]}" if len(phone) >= 8 else phone
+
+
+def create_grant(phone: str, label: str, level: str, scope: str,
+                 days: int | None, multi_account: bool = True) -> dict:
+    """Создаёт/обновляет доступ по телефону (телефон уникален — повтор = перевыдача).
+
+    days=None → без срока. multi_account — спільний дашборд по всіх рахунках
+    (платна опція; без нього клієнт бачить лише перший рахунок).
+    """
+    expires = None
+    if days is not None:
+        expires = (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+    with _lock, get_conn() as conn:
+        conn.execute(
+            """INSERT INTO access_grants(phone, label, level, scope, expires_at, multi_account)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(phone) DO UPDATE SET
+                 label=excluded.label, level=excluded.level, scope=excluded.scope,
+                 expires_at=excluded.expires_at, revoked=0,
+                 multi_account=excluded.multi_account""",
+            (phone, label, level, scope, expires, 1 if multi_account else 0),
+        )
+    return {"phone": phone, "label": label, "level": level, "scope": scope,
+            "expires_at": expires}
+
+
+def list_grants() -> list[dict]:
+    """Все доступы + вычисленный статус (active/expired/revoked) + киевское время."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM access_grants ORDER BY id DESC").fetchall()
+        grants = [dict(r) for r in rows]
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    for g in grants:
+        if g["revoked"]:
+            g["status"] = "revoked"
+        elif g["expires_at"] and g["expires_at"] < now:
+            g["status"] = "expired"
+        else:
+            g["status"] = "active"
+        g["expires_kyiv"] = utc_to_kyiv(g.get("expires_at"))
+        g["last_login_kyiv"] = human_kyiv(g.get("last_login_at"))
+    return grants
+
+
+# ============================================================
+# Время для отображения в админке (БД хранит UTC → показываем Киев)
+# ============================================================
+def utc_to_kyiv(ts: str | None, fmt: str = "%d.%m.%Y %H:%M") -> str:
+    """'2026-09-18 16:11' (UTC) → '18.09.2026 19:11' (Київ)."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.strptime(ts[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Europe/Kyiv")).strftime(fmt)
+    except ValueError:
+        return ts
+
+
+def human_kyiv(ts: str | None) -> str:
+    """Человеческое «когда было»: сьогодні 19:37 / вчора 21:05 / 17.08 14:20."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S" if ts.count(":") == 2 else "%Y-%m-%d %H:%M")
+        dt = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Europe/Kyiv"))
+    except ValueError:
+        return ts
+    now_k = datetime.now(ZoneInfo("Europe/Kyiv"))
+    if dt.date() == now_k.date():
+        return "сьогодні " + dt.strftime("%H:%M")
+    if (now_k.date() - dt.date()).days == 1:
+        return "вчора " + dt.strftime("%H:%M")
+    if dt.year == now_k.year:
+        return dt.strftime("%d.%m %H:%M")
+    return dt.strftime("%d.%m.%Y")
+
+
+def find_active_grant(phone: str) -> dict | None:
+    """Активный доступ по телефону (не отозван и не истёк) или None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM access_grants WHERE phone = ? AND revoked = 0",
+            (phone,)).fetchone()
+    if not row:
+        return None
+    g = dict(row)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    if g["expires_at"] and g["expires_at"] < now:
+        return None
+    return g
+
+
+def set_grant_level(gid: int, level: str) -> bool:
+    """Меняет уровень прав выданного доступа (view/chat/full)."""
+    if level not in GRANT_LEVELS:
+        return False
+    with _lock, get_conn() as conn:
+        cur = conn.execute("UPDATE access_grants SET level = ? WHERE id = ?",
+                           (level, gid))
+        return cur.rowcount > 0
+
+
+def set_grant_multi(gid: int, on: bool) -> bool:
+    """Вмикає/вимикає мультирахунок (спільний дашборд по всіх рахунках)."""
+    with _lock, get_conn() as conn:
+        cur = conn.execute("UPDATE access_grants SET multi_account = ? WHERE id = ?",
+                           (1 if on else 0, gid))
+        return cur.rowcount > 0
+
+
+def revoke_grant(gid: int) -> bool:
+    with _lock, get_conn() as conn:
+        cur = conn.execute("UPDATE access_grants SET revoked = 1 WHERE id = ?", (gid,))
+        return cur.rowcount > 0
+
+
+def extend_grant(gid: int, days: int) -> bool:
+    """Продлевает доступ на N дней от максимума (сейчас / текущий срок)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT expires_at FROM access_grants WHERE id = ?", (gid,)).fetchone()
+        if not row:
+            return False
+        now = datetime.now(timezone.utc)
+        if row["expires_at"]:
+            try:
+                base = datetime.strptime(row["expires_at"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                base = max(base, now)
+            except ValueError:
+                base = now
+        else:
+            base = now
+        new_exp = (base + timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+        conn.execute("UPDATE access_grants SET expires_at = ?, revoked = 0 WHERE id = ?",
+                     (new_exp, gid))
+        return True
+
+
+def touch_grant_login(gid: int):
+    """Отмечает вход: счётчик + время."""
+    with _lock, get_conn() as conn:
+        conn.execute(
+            "UPDATE access_grants SET login_count = login_count + 1,"
+            " last_login_at = datetime('now') WHERE id = ?", (gid,))
+
+
+# ============================================================
+# Привязка Telegram-чата к кабинету клиента (номер = ключ)
+# ============================================================
+def bind_telegram(chat_id, phone: str) -> dict | None:
+    """Привязывает Telegram-чат к активному доступу по телефону."""
+    norm = normalize_phone(phone)
+    if not norm:
+        return None
+    grant = find_active_grant(norm)
+    if not grant:
+        return None
+    with _lock, get_conn() as conn:
+        # один Telegram-чат — один кабинет; у телефона может быть только один чат
+        conn.execute("UPDATE access_grants SET telegram_chat_id = NULL WHERE telegram_chat_id = ?",
+                     (str(chat_id),))
+        conn.execute("UPDATE access_grants SET telegram_chat_id = ? WHERE id = ?",
+                     (str(chat_id), grant["id"]))
+    return grant
+
+
+def unbind_telegram(chat_id) -> bool:
+    """Отвязывает чат (например, при отзыве доступа)."""
+    with _lock, get_conn() as conn:
+        cur = conn.execute("UPDATE access_grants SET telegram_chat_id = NULL WHERE telegram_chat_id = ?",
+                           (str(chat_id),))
+        return cur.rowcount > 0
+
+
+def find_grant_by_telegram(chat_id) -> dict | None:
+    """Активный доступ, привязанный к Telegram-чату (или None)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM access_grants WHERE telegram_chat_id = ? AND revoked = 0",
+            (str(chat_id),)).fetchone()
+    if not row:
+        return None
+    g = dict(row)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    if g["expires_at"] and g["expires_at"] < now:
+        return None
+    return g
+
+
+def owner_telegram_chats() -> list[str]:
+    """Telegram-чаты владельца (привязаны командой /owner с паролем админки)."""
+    val = get_setting("owner_telegram_chats")
+    try:
+        return [str(x) for x in (val or [])]
+    except TypeError:
+        return []
+
+
+def add_owner_telegram_chat(chat_id) -> bool:
+    chats = owner_telegram_chats()
+    if str(chat_id) in chats:
+        return False
+    chats.append(str(chat_id))
+    set_setting("owner_telegram_chats", chats)
+    return True

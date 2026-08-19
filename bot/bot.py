@@ -48,57 +48,150 @@ MIN_TEXT_LEN = 50  # короткі повідомлення — не випис
 
 
 # ============================================================
+# Кабінеты: клиент (доступ по телефону) / владелец / аноним
+# ============================================================
+def _workspace(update: Update) -> tuple[dict | None, bool]:
+    """(grant|None, is_owner) для текущего чата.
+
+    Клиент: чат привязан к активному доступу по телефону → grant.
+    Владелец: чат привязан командой /owner <пароль> → (None, True).
+    Аноним: (None, False) — просим номер телефона.
+    """
+    chat_id = update.effective_chat.id if update.effective_chat else update.message.chat_id
+    grant = db_bridge.find_grant_by_telegram(chat_id)
+    if grant:
+        return grant, False
+    return None, db_bridge.is_owner_chat(chat_id)
+
+
+def _bind_prompt(update: Update):
+    """Просит анонима привязать кабинет кнопкой или номером текстом."""
+    from telegram import KeyboardButton, ReplyKeyboardMarkup
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True)
+    return update.message.reply_text(
+        "🔒 Цей бот — для клієнтів з активним доступом.\n\n"
+        "Натисни кнопку нижче або надішли свій номер телефону — прив'яжу кабінет "
+        "(доступ видає адміністратор).",
+        reply_markup=kb)
+
+
+# ============================================================
 # Команди
 # ============================================================
 async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Привіт! Я — AI-фінансовий радник.\n\n"
-        "📊 *Що я вмію:*\n"
-        "  • Надішли *PDF або CSV виписку* — рознесу по категоріях через AI\n"
-        "  • Запиши *питання текстом* — відповім по твоїх даних\n"
-        "  • Дані копляться по *рахунку (IBAN)* — завантажуй скільки завгодно\n\n"
-        "*Команди:*\n"
-        "  /summary — зведення по всіх рахунках\n"
-        "  /report — P&L-звіт за минулий місяць\n"
-        "  /accounts — список твоїх рахунків\n"
-        "  /reset — очистити історію чату\n\n"
-        "Просто скинь файл виписки або напиши питання 🙂",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    grant, is_owner = _workspace(update)
+    if grant:
+        lvl = db_bridge.GRANT_LEVELS.get(grant["level"], grant["level"])
+        can_upload = "✅ Так" if grant["level"] == "full" else "❌ Ні (потрібен рівень «повний»)"
+        await update.message.reply_text(
+            f"👋 Кабінет: *{grant['label'] or db_bridge.mask_phone(grant['phone'])}*\n"
+            f"Права: {lvl}\n"
+            f"Завантаження виписок: {can_upload}\n\n"
+            "📎 Надішли PDF/CSV виписку — або просто запитай текстом "
+            "«скільки витратив на рекламу?»\n"
+            "Команди: /summary · /accounts · /reset",
+            parse_mode=ParseMode.MARKDOWN)
+        return
+    if is_owner:
+        await update.message.reply_text(
+            "👑 Режим власника — видно всі рахунки.\n\n"
+            "📎 Надішли виписку або запитай щось. Команди: /summary · /report · /accounts")
+        return
+    await _bind_prompt(update)
 
 
-def _accounts_or_all(chat_id) -> list[dict]:
-    """Рахунки Telegram-чату. Якщо за чатом своїх рахунків немає (виписку
-    завантажили через веб-форму, де chat_id = IBAN) — повертаємо всі рахунки:
-    система персональна, тож це ті самі дані користувача."""
-    accounts = db_bridge.list_user_accounts(str(chat_id))
-    if not accounts:
-        accounts = db_bridge.list_user_accounts("")
-        if accounts:
-            log.info("chat=%s: своїх рахунків немає — показую всі (веб-загрузка)", chat_id)
-    return accounts
+async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Привязка чата как чата владельца: /owner <пароль админкі>."""
+    if not context.args:
+        await update.message.reply_text("Використання: /owner <пароль адмінки>")
+        return
+    from dashboard import auth as dash_auth
+    if dash_auth.check_password(" ".join(context.args)):
+        db_bridge.add_owner_chat(update.message.chat_id)
+        await update.message.reply_text("👑 Цей чат тепер чат власника — видно всі рахунки.")
+    else:
+        await update.message.reply_text("❌ Невірний пароль.")
+
+
+async def handle_contact(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    """Клиент поделился номером (кнопка) → привязываем кабинет."""
+    chat_id = update.message.chat_id
+    raw = update.message.contact.phone_number if update.message.contact else ""
+    # Telegram надсилає номер і без «+» (38067…) — нормалізуємо до +380…
+    phone = db_bridge.normalize_phone(raw) or raw
+    grant = db_bridge.bind_telegram(chat_id, phone) if phone else None
+    if grant:
+        lvl = db_bridge.GRANT_LEVELS.get(grant["level"], grant["level"])
+        from telegram import ReplyKeyboardRemove
+        await update.message.reply_text(
+            f"✅ Кабінет прив'язаний: {grant['label'] or db_bridge.mask_phone(grant['phone'])} "
+            f"(права: {lvl}).\n\n"
+            "Тепер надсилай виписки 📎 та питай що завгодно про свої фінанси.",
+            reply_markup=ReplyKeyboardRemove(selective=False))
+    else:
+        await update.message.reply_text(
+            f"❌ Доступ для номера {db_bridge.mask_phone(phone or '?')} не знайдено "
+            "або строк минув. Зверніться до адміністратора.")
+
+
+def _first_client_iban(phone: str) -> str:
+    """Перший (найстаріший) рахунок клієнта — для доступу без мультирахунку."""
+    accs = db_bridge.list_user_accounts(phone)
+    if not accs:
+        return ""
+    return sorted(accs, key=lambda a: a.get("first_seen") or "")[0]["iban"]
+
+
+def _ws_accounts(update: Update) -> list[dict] | None:
+    """Счета кабинета или None, если аноним (тогда нужно просить привязку).
+
+    Клиент — только свои счета (ключ = телефон); без мультирахунку — лише перший.
+    Владелец — свои, при пустоте — все счета системы."""
+    grant, is_owner = _workspace(update)
+    if grant:
+        accs = db_bridge.list_user_accounts(grant["phone"])
+        if not grant.get("multi_account") and accs:
+            single = _first_client_iban(grant["phone"])
+            accs = [a for a in accs if a["iban"] == single]
+        return accs
+    if is_owner:
+        return (db_bridge.list_user_accounts(update.message.chat_id)
+                or db_bridge.list_user_accounts(""))
+    return None
 
 
 async def cmd_summary(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    """ИИ-генерируемая сводка по всем счетам пользователя."""
-    chat_id = update.message.chat_id
-    accounts = _accounts_or_all(chat_id)
-    if not accounts:
-        await update.message.reply_text(
-            "У тебе ще немає завантажених виписок. Надішли PDF або CSV виписку 📎"
-        )
+    """ИИ-генерируемая сводка по счетам кабинета."""
+    grant, is_owner = _workspace(update)
+    if not grant and not is_owner:
+        await _bind_prompt(update)
         return
-    summary_text = db_bridge.get_summary_for_user(chat_id)
-    if not summary_text:
-        summary_text = db_bridge.get_summary_for_user("")
+    if grant:
+        if grant.get("multi_account"):
+            summary_text = db_bridge.get_summary_for_user(grant["phone"])
+        else:
+            single = _first_client_iban(grant["phone"])
+            summary_text = db_bridge.get_summary_by_iban(single) if single else ""
+        if not summary_text:
+            await update.message.reply_text(
+                "У тебе ще немає завантажених виписок. Надішли PDF або CSV виписку 📎"
+            )
+            return
+    else:  # владелец: свои счета, иначе все
+        summary_text = (db_bridge.get_summary_for_user(update.message.chat_id)
+                        or db_bridge.get_summary_for_user(""))
     # отправим как plain text (без markdown, т.к. в сводке могут быть спецсимволы)
     await update.message.reply_text(summary_text or "Дані поки що порожні.")
 
 
 async def cmd_accounts(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    """Список счетов пользователя с краткой статистикой."""
-    chat_id = update.message.chat_id
-    accounts = _accounts_or_all(chat_id)
+    """Список счетов кабинета с краткой статистикой."""
+    accounts = _ws_accounts(update)
+    if accounts is None:
+        await _bind_prompt(update)
+        return
     if not accounts:
         await update.message.reply_text(
             "У тебе ще немає рахунків. Надішли виписку (PDF/CSV) 📎"
@@ -127,9 +220,11 @@ async def cmd_reset(update: Update, _: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_report(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    """P&L-отчёт за прошлый месяц по всем счетам пользователя (по запросу)."""
-    chat_id = update.message.chat_id
-    accounts = _accounts_or_all(chat_id)
+    """P&L-отчёт за прошлый месяц по счетам кабинета (по запросу)."""
+    accounts = _ws_accounts(update)
+    if accounts is None:
+        await _bind_prompt(update)
+        return
     if not accounts:
         await update.message.reply_text(
             "У тебе ще немає рахунків з даними. Надішли виписку (PDF/CSV) 📎"
@@ -157,6 +252,18 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
     """Принимает PDF/CSV, парсит, извлекает IBAN, категоризует, копит по IBAN."""
     chat_id = update.message.chat_id
     import file_handler as fh
+
+    # кабинет: анонимам — привязка, клиентам без полного уровня — отказ
+    grant, is_owner = _workspace(update)
+    if not grant and not is_owner:
+        await _bind_prompt(update)
+        return
+    if grant and grant["level"] != "full":
+        await update.message.reply_text(
+            "🔒 Завантаження виписок доступне лише з повним рівнем доступу.")
+        return
+    ws_id = grant["phone"] if grant else str(chat_id)
+    ws_label = (grant["label"] or db_bridge.mask_phone(grant["phone"])) if grant else None
 
     processing = await update.message.reply_text(
         "⏳ Завантажую файл і розпізнаю виписку... (PDF — до 2 хв)"
@@ -193,20 +300,34 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
         deepseek_key = db_bridge.get_deepseek_key()
         categories = db_bridge.get_categories()
         model = db_bridge.get_deepseek_model()
-        transactions = await ai.categorize_async(text, deepseek_key, categories=categories, model=model)
-        log.info("chat=%s: розібрано %d транзакцій (iban=%s)", chat_id, len(transactions), iban)
+        meta: dict = {}
+        transactions = await ai.categorize_async(text, deepseek_key, categories=categories,
+                                                 model=model, usage_meta=meta)
+        log.info("chat=%s (кабінет %s): розібрано %d транзакцій (iban=%s)",
+                 chat_id, ws_id, len(transactions), iban)
+        from dashboard import db as dashboard_db
+        tg_label = ws_label or (update.message.from_user.username
+                                or update.message.from_user.first_name or str(chat_id))
+        dashboard_db.log_usage(f"Telegram · {tg_label}", "загрузка виписки", source="telegram",
+                               model=meta.get("model", ""),
+                               api_calls=meta.get("api_calls", 0),
+                               prompt_tokens=meta.get("prompt_tokens", 0),
+                               completion_tokens=meta.get("completion_tokens", 0),
+                               cached_tokens=meta.get("cached_tokens", 0),
+                               seconds=meta.get("seconds", 0.0),
+                               details=f"{filename}: {len(transactions)} транзакцій")
 
-        # 5. Сохранить с IBAN
-        username = update.message.from_user.username or update.message.from_user.first_name or ""
-        session_id = db_bridge.save_result(transactions, chat_id, username, iban=iban)
+        # 5. Сохранить с IBAN (в кабинет: телефон клиента / chat_id владельца)
+        username = tg_label
+        session_id = db_bridge.save_result(transactions, ws_id, username, iban=iban)
         db_saved = session_id is not None
 
         # 5б. Автоэкспорт в Google Sheets (если включён в админке; не валит бота)
         sheets_ok = db_bridge.auto_export_to_sheets(transactions)
 
-        # 6. Метрики + аномалии (по всем транзакциям этого счёта, накопительно)
+        # 6. Метрики + аномалии (по всем транзакциях кабинета по этому счёту)
         from dashboard import db as dbmod
-        all_tx = dbmod.get_transactions(chat_id=str(chat_id), iban=iban, limit=100000)
+        all_tx = dbmod.get_transactions(chat_id=str(ws_id), iban=iban, limit=100000)
         metrics = ai.compute_metrics(all_tx)
         thresholds = db_bridge.get_alert_thresholds()
         anomalies = ai.detect_anomalies(metrics, thresholds)
@@ -214,7 +335,7 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
         # 7. Ответ
         summary = ai.build_summary(metrics, anomalies)
         summary += f"\n\n🏦 Рахунок: `{info['iban_mask']}`"
-        summary += f"\n📊 Дашборд: http://localhost:8000"
+        summary += f"\n📊 Дашборд: {ai.DASHBOARD_URL}"
         if not db_saved:
             summary += "\n\n⚠️ Не вдалося зберегти (див. логи)."
         if sheets_ok:
@@ -248,35 +369,82 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
 # Обработчик ТЕКСТА = чат с ИИ
 # ============================================================
 async def handle_chat(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    """Текст = вопрос к ИИ. ИИ отвечает по данным пользователя (живая сводка)."""
+    """Текст = вопрос к ИИ. Анониму — привязка кабинета по номеру телефона."""
     chat_id = update.message.chat_id
     user_msg = (update.message.text or "").strip()
 
     if not user_msg:
         return
 
+    # кабинет: аноним → пробуем привязать по номеру в тексте
+    grant, is_owner = _workspace(update)
+    if not grant and not is_owner:
+        norm = db_bridge.normalize_phone(user_msg)
+        if norm:
+            g = db_bridge.bind_telegram(chat_id, norm)
+            if g:
+                lvl = db_bridge.GRANT_LEVELS.get(g["level"], g["level"])
+                from telegram import ReplyKeyboardRemove
+                await update.message.reply_text(
+                    f"✅ Кабінет прив'язаний: {g['label'] or db_bridge.mask_phone(g['phone'])} "
+                    f"(права: {lvl}).\n\n"
+                    "Тепер надсилай виписки 📎 та питай що завгодно про свої фінанси.",
+                    reply_markup=ReplyKeyboardRemove(selective=False))
+            else:
+                await update.message.reply_text(
+                    f"❌ Доступ для номера {db_bridge.mask_phone(norm)} не знайдено "
+                    "або строк минув. Зверніться до адміністратора.")
+        else:
+            await _bind_prompt(update)
+        return
+
+    if grant and grant["level"] not in ("chat", "full"):
+        await update.message.reply_text("🔒 Чат із ШІ у вашому доступі вимкнено (лише перегляд).")
+        return
+
+    # ключ кабинета: телефон клиента / chat_id владельца
+    key = grant["phone"] if grant else str(chat_id)
+    ws_label = (grant["label"] or db_bridge.mask_phone(grant["phone"])) if grant else None
+
     # сохраняем вопрос в историю
-    db_bridge.add_chat_message(chat_id, "user", user_msg)
+    db_bridge.add_chat_message(key, "user", user_msg)
 
     processing = await update.message.reply_text("🤔 Думаю...")
 
     try:
         deepseek_key = db_bridge.get_deepseek_key()
-        # живая сводка по счетам + история + RAG-поиск по вопросу
-        summary_text = db_bridge.get_summary_for_user(chat_id)
-        if not summary_text:
-            # виписка завантажена через веб (chat_id = IBAN) — система персональна,
-            # тож ІІ бачить зведення по всіх рахунках користувача
-            summary_text = db_bridge.get_summary_for_user("")
-        relevant = db_bridge.find_relevant(user_msg, chat_id=str(chat_id))
+        # живая сводка по счетам кабинета + история + RAG-поиск по вопросу
+        if grant and not grant.get("multi_account"):
+            # без мультирахунку — лише перший рахунок клієнта
+            single = _first_client_iban(key)
+            summary_text = db_bridge.get_summary_by_iban(single) if single else ""
+            relevant = db_bridge.find_relevant(user_msg, iban=single) if single else ""
+        else:
+            summary_text = db_bridge.get_summary_for_user(key)
+            if not summary_text and is_owner:
+                # у владельца виписки могут лежать под другими ключами — показываем все
+                summary_text = db_bridge.get_summary_for_user("")
+            relevant = db_bridge.find_relevant(user_msg, chat_id=key)
         system_prompt = ai.build_chat_system_prompt(summary_text, relevant=relevant)
-        history = db_bridge.get_chat_history(chat_id, limit=10)
+        history = db_bridge.get_chat_history(key, limit=10)
         model = db_bridge.get_deepseek_model()
 
         messages = [{"role": "system", "content": system_prompt}] + history
-        reply = await ai.chat_async(messages, deepseek_key, model=model)
+        meta: dict = {}
+        reply = await ai.chat_async(messages, deepseek_key, model=model, usage_meta=meta)
+        from dashboard import db as dashboard_db
+        tg_label = ws_label or (update.message.from_user.username
+                                or update.message.from_user.first_name or str(chat_id))
+        dashboard_db.log_usage(f"Telegram · {tg_label}", "чат", source="telegram",
+                               model=meta.get("model", ""),
+                               api_calls=meta.get("api_calls", 0),
+                               prompt_tokens=meta.get("prompt_tokens", 0),
+                               completion_tokens=meta.get("completion_tokens", 0),
+                               cached_tokens=meta.get("cached_tokens", 0),
+                               seconds=meta.get("seconds", 0.0),
+                               details=f"питання: {user_msg[:80]}")
 
-        db_bridge.add_chat_message(chat_id, "assistant", reply)
+        db_bridge.add_chat_message(key, "assistant", reply)
 
         try:
             await processing.delete()
@@ -312,11 +480,13 @@ def build_application() -> Application | None:
     app = Application.builder().token(token).build()
     # команды
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("owner", cmd_owner))
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("accounts", cmd_accounts))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("report", cmd_report))
-    # файл = виписка, текст = чат с ИИ
+    # контакт = привязка кабинета, файл = виписка, текст = чат с ИИ
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
     return app

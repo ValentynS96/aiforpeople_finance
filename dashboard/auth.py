@@ -204,3 +204,50 @@ def get_iban_session(request: Request) -> str:
     except ValueError:
         return ""
     return iban
+
+
+# ============================================================
+# Телефонная сессия (вход по номеру — доступ выдаёт админ)
+# ============================================================
+PHONE_COOKIE = "phone_session"
+
+
+def set_phone_session(response, phone: str, level: str, scope: str):
+    """Ставит подписанный cookie телефонной сессии: phone:level:scope.
+
+    Сам cookie живёт 7 дней; актуальность доступа (отзыв/истечение)
+    дополнительно проверяется по БД на каждом запросе (см. routes._phone_user).
+    """
+    expires = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
+    token = _make_token(expires, f"{phone}:{level}:{scope}")
+    response.set_cookie(
+        PHONE_COOKIE, token,
+        max_age=SESSION_DAYS * 86400,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def clear_phone_session(response):
+    response.delete_cookie(PHONE_COOKIE)
+
+
+def get_phone_session(request: Request) -> dict | None:
+    """Телефонная сессия из cookie: {phone, level, scope} или None."""
+    token = request.cookies.get(PHONE_COOKIE)
+    if not token or token.count("|") != 2:
+        return None
+    expires_at, payload, sig = token.split("|")
+    if not hmac.compare_digest(token, _make_token(expires_at, payload)):
+        return None
+    try:
+        exp = datetime.fromisoformat(expires_at)
+        if datetime.now(timezone.utc) >= exp:
+            return None
+    except ValueError:
+        return None
+    parts = payload.split(":")
+    if len(parts) != 3:
+        return None
+    phone, level, scope = parts
+    return {"phone": phone, "level": level, "scope": scope}

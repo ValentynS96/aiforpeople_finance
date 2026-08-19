@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Фінанси — {{ iban_mask }}</title>
-<link rel="stylesheet" href="/static/style.css?v=6">
+<link rel="stylesheet" href="/static/style.css?v=7">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -15,7 +15,8 @@
   <div class="topbar">
     <div class="topbar-brand">💼 AI <span class="gradient">Фінанси</span></div>
     <div class="topbar-nav">
-      <span class="account-badge" title="Ваш номер рахунку">🏦 {{ iban_mask }}</span>
+      <select class="period-btn" id="accountSwitcher" style="max-width:220px;"
+              title="Обрати рахунок" onchange="switchAccount(this.value)"></select>
       <a href="/admin" title="Налаштування для куратора">⚙️</a>
       <a href="/logout-iban" title="Вийти з іншого рахунку">Вийти</a>
     </div>

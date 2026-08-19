@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Фінанси — почнемо</title>
-<link rel="stylesheet" href="/static/style.css?v=6">
+<link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
 <div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
@@ -14,10 +14,17 @@
 
     <div class="welcome-card">
       <div class="welcome-icon">💼</div>
+      {% if who %}
+      <h1>Привіт, {{ who }}! 👋</h1>
+      <p class="welcome-sub">Ваш кабінет відкрито. Завантажте першу виписку — або вона вже могла прилетіти з Telegram.</p>
+      <p style="text-align:right;font-size:13px;"><a href="/logout-iban" style="color:var(--text-muted);">Вийти</a></p>
+      {% else %}
       <h1>AI замість фінансиста</h1>
       <p class="welcome-sub">Почніть з одного кроку — завантажте банківську виписку.</p>
+      {% endif %}
 
-      <!-- ГЛАВНОЕ ДЕЙСТВИЕ: загрузка первой выписки -->
+      <!-- ГЛАВНОЕ ДЕЙСТВИЕ: загрузка первой выписки (только после входа) -->
+      {% if show_upload %}
       <div class="upload-zone" id="firstUploadZone" style="margin-bottom:8px;">
         <input type="file" id="firstFileInput" accept=".pdf,.csv,.txt" hidden>
         <div class="upload-icon">📎</div>
@@ -26,8 +33,22 @@
         </div>
         <div class="upload-sub" style="font-size:15px;">PDF або CSV · до 20 МБ · IBAN знайдемо самі</div>
       </div>
+      <p class="hint" style="margin:10px 0 0;">
+        💬 Або надішліть виписку нашому боту в Telegram — після обробки вона
+        автоматично з'явиться тут, у вашому кабінеті.
+      </p>
+      {% elif who %}
+      <p class="hint" style="margin:14px 0 0;">
+        🔒 Завантаження виписок доступне з рівнем «повний». Зверніться до адміністратора.
+      </p>
+      {% else %}
+      <p class="hint" style="margin:14px 0 0;">
+        📎 Завантаження виписок доступне в дашборді одразу після входу за телефоном.
+      </p>
+      {% endif %}
 
       <!-- ПРОГРЕСС: живёт на сервере, переживает перезагрузку страницы -->
+      {% if show_upload %}
       <div id="firstProgress" style="display:none;margin:16px 0;">
         <div class="upload-progress">
           <div class="progress-step" id="fstep-parse"><span class="step-icon">⏳</span> Розпізнання файлу</div>
@@ -42,11 +63,31 @@
           Далі → до дашборду
         </button>
       </div>
+      {% endif %}
 
-      <!-- ВХОД ДЛЯ ВОЗВРАЩАЮЩИХСЯ -->
+      <!-- ВХОД ЗА ТЕЛЕФОНОМ (доступ видає адмін) — тільки для анонімів -->
+      {% if not who %}
+      <div style="margin-top:24px;padding:18px;border:1px solid var(--border);border-radius:14px;">
+        <div style="font-size:17px;margin-bottom:6px;">📱 Вже є доступ? Увійдіть за телефоном</div>
+        <p class="hint" style="margin:0 0 12px;">
+          Адмін видає доступ за номером телефону — без паролів і SMS.
+        </p>
+        <form method="post" action="/login-phone" class="welcome-form">
+          <div class="form-row">
+            <label for="phone">Номер телефону</label>
+            <input type="tel" id="phone" name="phone" placeholder="+380 67 123 45 67"
+                   autocomplete="tel" inputmode="tel" required>
+          </div>
+          {% if phone_error %}<div class="login-error">{{ phone_error }}</div>{% endif %}
+          <button class="btn" type="submit" style="width:100%;justify-content:center;">Увійти →</button>
+        </form>
+      </div>
+
+      {% if iban_login_allowed %}
+      <!-- ВХОД ЗА IBAN (демо-режим, вмикається в адмінці) -->
       <details style="margin-top:20px;">
         <summary style="cursor:pointer;font-size:17px;color:var(--text-secondary);">
-          🔑 Уже завантажували? Увійти за номером рахунку
+          🔑 Увійти за номером рахунку (IBAN)
         </summary>
         <form method="post" action="/login-iban" class="welcome-form" style="margin-top:14px;">
           <div class="form-row">
@@ -58,10 +99,9 @@
           {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
           <button class="btn" type="submit" style="width:100%;justify-content:center;">Увійти →</button>
         </form>
-        <button class="btn secondary small" id="demoBtn" type="button" style="margin-top:10px;width:100%;justify-content:center;">
-          Подивитись демо-дашборд
-        </button>
       </details>
+      {% endif %}
+      {% endif %}
 
     </div>
 
@@ -79,20 +119,23 @@ const nextBtn = document.getElementById('nextBtn');
 let pollTimer = null;
 let doneIban = null;
 
-// --- запуск загрузки ---
-zone.addEventListener('click', () => { if (!zone.classList.contains('busy')) input.click(); });
-zone.addEventListener('dragover', e => { e.preventDefault(); if (!zone.classList.contains('busy')) zone.classList.add('dragover'); });
-zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-zone.addEventListener('drop', e => {
-  e.preventDefault(); zone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) uploadFirst(e.dataTransfer.files[0]);
-});
-input.addEventListener('change', () => {
-  if (input.files.length) uploadFirst(input.files[0]);
-  input.value = '';
-});
+// --- запуск загрузки (элементы есть только для вошедших) ---
+if (zone && input) {
+  zone.addEventListener('click', () => { if (!zone.classList.contains('busy')) input.click(); });
+  zone.addEventListener('dragover', e => { e.preventDefault(); if (!zone.classList.contains('busy')) zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) uploadFirst(e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) uploadFirst(input.files[0]);
+    input.value = '';
+  });
+}
 
-document.getElementById('demoBtn').addEventListener('click', () => {
+const demoBtn = document.getElementById('demoBtn');
+if (demoBtn) demoBtn.addEventListener('click', () => {
   const f = document.createElement('form');
   f.method = 'POST'; f.action = '/login-iban';
   const i = document.createElement('input');
@@ -187,7 +230,7 @@ function setZoneBusy(busy) {
 }
 
 // --- переход на дашборд (после завершения) ---
-nextBtn.addEventListener('click', async () => {
+if (nextBtn) nextBtn.addEventListener('click', async () => {
   if (!doneIban) return;
   nextBtn.disabled = true;
   nextBtn.textContent = 'Відкриваю...';
@@ -199,7 +242,7 @@ nextBtn.addEventListener('click', async () => {
 
 // --- перезагрузка страницы: задача продолжается — восстанавливаем статус ---
 const savedJob = localStorage.getItem('firstUploadJob');
-if (savedJob) {
+if (savedJob && zone) {
   setZoneBusy(true);
   startPolling(savedJob);
 }

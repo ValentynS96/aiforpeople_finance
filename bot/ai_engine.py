@@ -18,6 +18,7 @@ import asyncio
 import json
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -70,6 +71,7 @@ SYSTEM_PROMPT = """Ти — AI-асистент для аналізу банкі
 - Усі суми в грн"""
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+DASHBOARD_URL = "https://finance.aiforpeople.expert"  # посилання в повідомленнях бота
 DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"  # безопасный дефолт; реальная — из БД/админки
 
@@ -161,10 +163,29 @@ def build_system_prompt(categories: list[str] | None = None) -> str:
 # ============================================================
 # 1. Категоризація через DeepSeek
 # ============================================================
+def _merge_usage(meta: dict | None, usage: dict, seconds: float, model: str):
+    """Сумує usage одного API-запиту у meta — для статистики в адмінці.
+
+    meta — опційний dict, який передає викликач; заповнюється по місцю
+    (api_calls, prompt/completion/cached_tokens, seconds, model).
+    """
+    if meta is None:
+        return
+    meta["api_calls"] = meta.get("api_calls", 0) + 1
+    meta["prompt_tokens"] = meta.get("prompt_tokens", 0) + int(usage.get("prompt_tokens") or 0)
+    meta["completion_tokens"] = meta.get("completion_tokens", 0) + int(usage.get("completion_tokens") or 0)
+    details = usage.get("prompt_tokens_details") or {}
+    cached = details.get("cached_tokens") or usage.get("prompt_cache_hit_tokens") or 0
+    meta["cached_tokens"] = meta.get("cached_tokens", 0) + int(cached)
+    meta["seconds"] = round(meta.get("seconds", 0.0) + seconds, 2)
+    meta["model"] = model or DEEPSEEK_DEFAULT_MODEL
+
+
 def categorize(text: str, api_key: str, *, timeout: int = 300,
                categories: list[str] | None = None,
                model: str = "",
-               progress_cb=None) -> list[dict]:
+               progress_cb=None,
+               usage_meta: dict | None = None) -> list[dict]:
     """Сира виписка → масив транзакцій з категоріями.
 
     Великі виписки автоматично розбиваються на частини (_split_statement),
@@ -194,7 +215,7 @@ def categorize(text: str, api_key: str, *, timeout: int = 300,
             try:
                 result = _categorize_one(chunk, api_key, timeout=timeout,
                                          categories=categories, model=model,
-                                         part=(i + 1, total))
+                                         part=(i + 1, total), usage_meta=usage_meta)
                 with lock:
                     done += 1
                     if progress_cb:
@@ -221,7 +242,8 @@ def categorize(text: str, api_key: str, *, timeout: int = 300,
 
 def _categorize_one(text: str, api_key: str, *, timeout: int,
                     categories: list[str] | None, model: str,
-                    part: tuple[int, int] | None = None) -> list[dict]:
+                    part: tuple[int, int] | None = None,
+                    usage_meta: dict | None = None) -> list[dict]:
     """Один запит до DeepSeek для однієї частини виписки."""
     user_content = text
     if part and part[1] > 1:
@@ -243,12 +265,17 @@ def _categorize_one(text: str, api_key: str, *, timeout: int,
     }
 
     try:
+        t0 = time.monotonic()
         resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException as e:
         raise AIError(f"DeepSeek API недоступний: {e}") from e
 
-    content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+    data = resp.json()
+    _merge_usage(usage_meta, data.get("usage") or {}, time.monotonic() - t0,
+                 payload["model"])
+
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
     # Парсинг JSON (DeepSeek іноді обгортає в текст)
     parsed = _extract_json(content)
@@ -279,11 +306,13 @@ def _categorize_one(text: str, api_key: str, *, timeout: int,
 async def categorize_async(text: str, api_key: str, *, timeout: int = 300,
                            categories: list[str] | None = None,
                            model: str = "",
-                           progress_cb=None) -> list[dict]:
+                           progress_cb=None,
+                           usage_meta: dict | None = None) -> list[dict]:
     """Async-обёртка над categorize(): не блокирует event loop."""
     return await asyncio.to_thread(categorize, text, api_key,
                                    timeout=timeout, categories=categories,
-                                   model=model, progress_cb=progress_cb)
+                                   model=model, progress_cb=progress_cb,
+                                   usage_meta=usage_meta)
 
 
 def _extract_json(content: str) -> dict | None:
@@ -332,7 +361,7 @@ def build_chat_system_prompt(account_summary: str, relevant: str = "") -> str:
 
 
 def chat(messages: list[dict], api_key: str, *, timeout: int = 60,
-         model: str = "") -> str:
+         model: str = "", usage_meta: dict | None = None) -> str:
     """Multi-turn чат с DeepSeek. messages = [{role, content}, ...].
 
     model: модель DeepSeek (по умолчанию DEEPSEEK_DEFAULT_MODEL; реальная — из БД).
@@ -352,18 +381,24 @@ def chat(messages: list[dict], api_key: str, *, timeout: int = 60,
     }
 
     try:
+        t0 = time.monotonic()
         resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException as e:
         raise AIError(f"DeepSeek API недоступний: {e}") from e
 
-    return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    data = resp.json()
+    _merge_usage(usage_meta, data.get("usage") or {}, time.monotonic() - t0,
+                 payload["model"])
+
+    return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
 
 async def chat_async(messages: list[dict], api_key: str, *, timeout: int = 60,
-                     model: str = "") -> str:
+                     model: str = "", usage_meta: dict | None = None) -> str:
     """Async-обёртка над chat(): не блокирует event loop."""
-    return await asyncio.to_thread(chat, messages, api_key, timeout=timeout, model=model)
+    return await asyncio.to_thread(chat, messages, api_key, timeout=timeout,
+                                   model=model, usage_meta=usage_meta)
 
 
 def list_models(api_key: str, *, timeout: int = 15) -> list[str]:
@@ -533,7 +568,7 @@ def build_summary(metrics: dict, anomalies: dict) -> str:
         f"📦 {metrics['tx_count']} транзакцій оброблено\n\n"
         f"{'🏆 Топ-витрата: ' + metrics['top_category'] + chr(10) + chr(10) if metrics['top_category'] != '—' else ''}"
         f"{a + chr(10) + chr(10) if a else ''}"
-        "Детальніше — у дашборді: http://localhost:8000 📊"
+        f"Детальніше — у дашборді: {DASHBOARD_URL} 📊"
     )
 
 

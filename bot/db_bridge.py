@@ -420,3 +420,36 @@ def auto_export_to_sheets(transactions: list[dict]) -> bool:
     except Exception as e:
         _log.warning("Sheets: экспорт не вдався (не ламаю основну обробку): %s", e)
         return False
+
+
+# ============================================================
+# Доступы-кабинеты по телефону (для привязки Telegram-чата)
+# ============================================================
+def find_grant_by_telegram(chat_id) -> dict | None:
+    """Активный доступ клиента, привязанный к этому Telegram-чату."""
+    return db.find_grant_by_telegram(chat_id)
+
+
+def bind_telegram(chat_id, phone: str) -> dict | None:
+    """Привязывает чат к кабинету по телефону (если доступ активен)."""
+    return db.bind_telegram(chat_id, phone)
+
+
+def is_owner_chat(chat_id) -> bool:
+    """Чат владельца (привязан командой /owner с паролем админки)."""
+    return str(chat_id) in db.owner_telegram_chats()
+
+
+def add_owner_chat(chat_id) -> bool:
+    return db.add_owner_telegram_chat(chat_id)
+
+
+def normalize_phone(raw: str) -> str:
+    return db.normalize_phone(raw)
+
+
+def mask_phone(phone: str) -> str:
+    return db.mask_phone(phone)
+
+
+GRANT_LEVELS = db.GRANT_LEVELS
