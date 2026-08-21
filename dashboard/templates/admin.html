@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Адмінка — AI замість фінансиста</title>
-<link rel="stylesheet" href="/static/style.css?v=7">
+<link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
 <div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
@@ -93,6 +93,13 @@
             <label for="multiAccount">🏦 Мультирахунок — спільний дашборд по всіх рахунках клієнта
               <span class="hint">(платна опція; без неї клієнт бачить лише перший рахунок)</span></label>
           </div>
+        </div>
+        <div class="form-row" style="grid-column:1/-1;">
+          <label>🔐 Код підтвердження видачі</label>
+          <input type="password" name="code" placeholder="Код видачі доступів" required
+                 autocomplete="off" inputmode="numeric">
+          <span class="hint">Другий фактор: без нього доступ видати неможливо,
+            навіть маючи пароль адмінки. Спроби з невірним кодом фіксуються в журналі.</span>
         </div>
         <div class="form-row" style="align-self:end;">
           <button class="btn" type="submit" style="width:100%;justify-content:center;">➕ Видати доступ</button>

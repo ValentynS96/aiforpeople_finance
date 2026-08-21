@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Фінанси — почнемо</title>
-<link rel="stylesheet" href="/static/style.css?v=7">
+<link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
 <div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
@@ -17,7 +17,7 @@
       {% if who %}
       <h1>Привіт, {{ who }}! 👋</h1>
       <p class="welcome-sub">Ваш кабінет відкрито. Завантажте першу виписку — або вона вже могла прилетіти з Telegram.</p>
-      <p style="text-align:right;font-size:13px;"><a href="/logout-iban" style="color:var(--text-muted);">Вийти</a></p>
+      <a href="/logout-iban" class="btn secondary small" style="display:inline-flex;margin:6px 0 18px;">↩ Вийти</a>
       {% else %}
       <h1>AI замість фінансиста</h1>
       <p class="welcome-sub">Почніть з одного кроку — завантажте банківську виписку.</p>
@@ -105,9 +105,11 @@
 
     </div>
 
+    {% if not who %}
     <p style="text-align:center;color:var(--text-muted);font-size:14px;margin-top:20px;">
       🤖 Або надішліть виписку нашому боту в Telegram — він усе зробить і надішле зведення.
     </p>
+    {% endif %}
   </div>
 </div>
 

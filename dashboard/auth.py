@@ -132,6 +132,40 @@ def check_password(password: str) -> bool:
     return _check_db_password(password)
 
 
+# --- Код підтвердження видачі доступів (другий фактор для /admin/grants) ---
+GRANT_CODE_KEY = "grant_code_hash"
+
+
+def set_grant_code(code: str):
+    """Сохраняет код выдачи доступов как PBKDF2-хэш (как пароль админки)."""
+    from dashboard import db as _db
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", code.encode("utf-8"), salt.encode("ascii"), 100_000
+    ).hex()
+    _db.set_setting(GRANT_CODE_KEY, {"salt": salt, "hash": digest})
+
+
+def grant_code_is_set() -> bool:
+    from dashboard import db as _db
+    rec = _db.get_setting(GRANT_CODE_KEY)
+    return bool(rec and isinstance(rec, dict) and rec.get("hash"))
+
+
+def check_grant_code(code: str) -> bool:
+    """Timing-safe проверка кода выдачи доступов."""
+    from dashboard import db as _db
+    rec = _db.get_setting(GRANT_CODE_KEY)
+    if not rec or not isinstance(rec, dict):
+        # код не заданий — видача заборонена (безпечний дефолт)
+        return False
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", (code or "").encode("utf-8"),
+        rec["salt"].encode("ascii"), 100_000
+    ).hex()
+    return hmac.compare_digest(digest, rec["hash"])
+
+
 def login(response, password: str) -> bool:
     """Проверяет пароль и ставит cookie. True если пароль верный."""
     if not check_password(password):

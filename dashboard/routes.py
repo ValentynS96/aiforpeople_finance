@@ -866,11 +866,24 @@ async def admin_save_model(request: Request, model: str = Form(...)):
 async def admin_create_grant(request: Request, phone: str = Form(...),
                              label: str = Form(""), level: str = Form("view"),
                              days: str = Form("30"),
-                             multi_account: bool = Form(False)):
-    """Выдаёт доступ-кабинет по номеру телефона. Повторная выдача = обновление."""
+                             multi_account: bool = Form(False),
+                             code: str = Form("")):
+    """Выдаёт доступ-кабинет по номеру телефона. Повторная выдача = обновление.
+
+    Требует второй фактор — код подтверждения выдачи (даже при админ-сессии)."""
     redir = auth.require_auth(request)
     if redir:
         return redir
+
+    # код видачі — обов'язковий другий фактор
+    if not auth.grant_code_is_set():
+        db.log_usage("адмін", "попытка выдачи без заданного кода", source="admin",
+                     ok=False, details=f"{db.mask_phone(db.normalize_phone(phone) or phone[:15])}")
+        return _admin_back(False, "Помилка: код видачі не налаштований. Зверніться до власника системи.")
+    if not auth.check_grant_code(code):
+        db.log_usage("адмін", "НЕВІРНИЙ КОД ВИДАЧІ", source="admin", ok=False,
+                     details=f"номер: {db.mask_phone(db.normalize_phone(phone) or phone[:15])}")
+        return _admin_back(False, "Помилка: невірний код підтвердження видачі (спробу зафіксовано)")
 
     norm = db.normalize_phone(phone)
     if not norm:

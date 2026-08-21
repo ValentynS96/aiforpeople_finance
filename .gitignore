@@ -24,3 +24,4 @@ data/
 *.zip
 dist/
 .zcode/
+webinar/

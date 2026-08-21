@@ -120,6 +120,30 @@ def extract_query(text: str) -> str:
     return " ".join(tokens)
 
 
+def mask_iban(iban: str) -> str:
+    """UA4421334422…7891 → UA44••••••••7891 (для позначок у промпті)."""
+    from bot.iban import mask
+    return mask(iban)
+
+
+def _detect_account(query: str, ibans: list[str]) -> str | None:
+    """Шукає вказівку на конкретний рахунок у питанні користувача.
+
+    Розпізнає повний IBAN («по UA442133…») та останні 4 цифри
+    («по рахунку 7891»). Останні-4 зараховуємо лише коли в питанні є
+    слово «рахун…», щоб не плутати з номерами транзакцій (#9923).
+    """
+    import re
+    squeezed = re.sub(r"\s+", "", query).lower()
+    mentions_account = "рахун" in query.lower()
+    for ib in ibans:
+        if ib.lower() in squeezed:                # повний IBAN без пробілів
+            return ib
+        if mentions_account and ib[-4:] in re.findall(r"\d{4}", query):
+            return ib
+    return None
+
+
 def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 10) -> str:
     """FTS5-поиск транзакций по словам вопроса → блок для промпта чата (RAG).
 
@@ -137,41 +161,55 @@ def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 10
         q = " ".join(words + extra)
     from bot import ai_engine as ai
 
-    ibans = [iban] if iban else []
+    ibans = [iban] if iban and iban != "all" else []
     if not ibans and chat_id:
         ibans = [a["iban"] for a in db.list_accounts(chat_id=str(chat_id))]
     if not ibans:
         ibans = [""]
 
-    agg: dict[str, dict] = {}
+    # вказівка на конкретний рахунок у питанні → шукаємо тільки по ньому
+    scope_note = ""
+    if len(ibans) > 1:
+        detected = _detect_account(query, ibans)
+        if detected:
+            ibans = [detected]
+            scope_note = (f"КОРИСТУВАЧ ПИТАЄ ЛИШЕ ПРО РАХУНОК {mask_iban(detected)}. "
+                          f"Дані нижче — тільки по ньому.\n")
+
+    agg: dict[tuple, dict] = {}
+    multi = len(ibans) > 1
     for ib in ibans:
         try:
             # stems+OR: нечёткий поиск — стволы слов, хотя бы одно совпадение
             # («військового збору» → військ* OR збору* → «Військовий збір»)
             for t in db.search_transactions(q, iban=ib, limit=100, stems=True, op="OR"):
                 d = t["description"] or "—"
-                if d not in agg:
-                    agg[d] = {"count": 0, "income": 0.0, "expense": 0.0, "category": t.get("category", "")}
+                key = (d, ib if multi else "")    # окремі рядки по рахунках, якщо їх кілька
+                if key not in agg:
+                    agg[key] = {"count": 0, "income": 0.0, "expense": 0.0,
+                                "category": t.get("category", ""), "iban": ib}
                 amt = t.get("amount") or 0
-                agg[d]["count"] += 1
+                agg[key]["count"] += 1
                 if amt > 0:
-                    agg[d]["income"] += amt
+                    agg[key]["income"] += amt
                 else:
-                    agg[d]["expense"] += abs(amt)
+                    agg[key]["expense"] += abs(amt)
         except Exception:
             continue
 
     if not agg:
         return ""
     lines = []
-    for d, v in list(agg.items())[:limit]:
-        parts = [f"- {d} (категорія: {v['category'] or '—'}): {v['count']} плат."]
+    for (d, _), v in list(agg.items())[:limit]:
+        label = f"[{mask_iban(v['iban'])}] " if multi else ""
+        parts = [f"- {label}{d} (категорія: {v['category'] or '—'}): {v['count']} плат."]
         if v["income"] > 0:
             parts.append(f"надходження {ai.fmt(v['income'])} грн")
         if v["expense"] > 0:
             parts.append(f"списання {ai.fmt(v['expense'])} грн")
         lines.append(", ".join(parts))
-    return "ЗНАЙДЕНО ЗА ЗАПИТОМ КОРИСТУВАЧА (це точні дані з транзакцій):\n  " + "\n  ".join(lines)
+    return (scope_note +
+            "ЗНАЙДЕНО ЗА ЗАПИТОМ КОРИСТУВАЧА (це точні дані з транзакцій):\n  " + "\n  ".join(lines))
 
 
 def _counterparties_block(iban: str, max_lines: int = 40) -> str:
