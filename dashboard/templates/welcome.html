@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Фінанси — почнемо</title>
-<link rel="stylesheet" href="/static/style.css?v=9">
+<link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 <div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
@@ -56,6 +56,7 @@
           <div class="progress-step" id="fstep-save"><span class="step-icon">⏳</span> Збереження</div>
         </div>
         <div class="progress-msg" id="firstMsg">Починаю...</div>
+        <div id="aiThinking" class="ai-thinking" style="display:none;"></div>
         <div id="firstResult"></div>
         <!-- Кнопка активна ТОЛЬКО когда обработка завершена -->
         <button class="btn" id="nextBtn" disabled
@@ -179,6 +180,34 @@ async function pollJob(jobId) {
   renderJob(job);
 }
 
+// --- «ШІ працює»: обертові фрази, поки триває категоризація ---
+const AI_PHRASES = [
+  '🧠 ШІ читає призначення кожного платежу…',
+  '🔍 Розпізнаю категорії: реклама, зарплата, податки…',
+  '💡 Звіряю суми з балансом виписки…',
+  '📊 Групую за місяцями та рахунками…',
+  '✨ Зводжу фінальні підсумки…',
+];
+let aiPhraseTimer = null;
+function startAiPhrases() {
+  stopAiPhrases();
+  const el = document.getElementById('aiThinking');
+  if (!el) return;
+  el.style.display = 'block';
+  let i = 0;
+  el.textContent = AI_PHRASES[0];
+  aiPhraseTimer = setInterval(() => {
+    i = (i + 1) % AI_PHRASES.length;
+    el.textContent = AI_PHRASES[i];
+  }, 2600);
+}
+function stopAiPhrases() {
+  if (aiPhraseTimer) clearInterval(aiPhraseTimer);
+  aiPhraseTimer = null;
+  const el = document.getElementById('aiThinking');
+  if (el) el.style.display = 'none';
+}
+
 function renderJob(job) {
   document.getElementById('firstProgress').style.display = 'block';
   const steps = ['parse', 'ai', 'save'];
@@ -193,9 +222,12 @@ function renderJob(job) {
     }
   });
   document.getElementById('firstMsg').textContent = job.message || '';
+  if (job.status === 'running' && job.step === 'ai') startAiPhrases();
+  else stopAiPhrases();
 
   if (job.status === 'running') return;
 
+  stopAiPhrases();
   clearInterval(pollTimer);
   localStorage.removeItem('firstUploadJob');
 

@@ -16,6 +16,7 @@ Telegram-бот «AI замість фінансиста» — демо для �
 Ключі читаються з БД (адмінка) з фоллбеком на .env.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -409,7 +410,22 @@ async def handle_chat(update: Update, _: ContextTypes.DEFAULT_TYPE):
     # сохраняем вопрос в историю
     db_bridge.add_chat_message(key, "user", user_msg)
 
-    processing = await update.message.reply_text("🤔 Думаю...")
+    # «ШІ думає»: повідомлення редагується з обертовими фразами
+    processing = await update.message.reply_text("🧠 Аналізую ваші транзакції…")
+
+    async def _rotate_thinking():
+        phrases = ["🔍 Звертаюсь до виписки…", "📊 Порівнюю категорії…",
+                   "🧮 Рахую суми…", "✨ Майже готово…"]
+        i = 0
+        while True:
+            await asyncio.sleep(2.4)
+            try:
+                await processing.edit_text(phrases[i % len(phrases)])
+            except Exception:
+                return  # повідомлення видалено/флуд-ліміт — тихо зупиняємось
+            i += 1
+
+    thinking_task = asyncio.create_task(_rotate_thinking())
 
     try:
         deepseek_key = db_bridge.get_deepseek_key()
@@ -446,11 +462,23 @@ async def handle_chat(update: Update, _: ContextTypes.DEFAULT_TYPE):
 
         db_bridge.add_chat_message(key, "assistant", reply)
 
+        thinking_task.cancel()
         try:
             await processing.delete()
         except Exception:
             pass
-        await update.message.reply_text(reply)
+        # жирні цифри (**…** → HTML-жирний)
+        safe = (reply.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        import re as _re
+        html_reply = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe)
+        await update.message.reply_text(html_reply, parse_mode=ParseMode.HTML)
+    except ai.AIError as e:
+        thinking_task.cancel()
+        log.error("chat=%s: AI помилка чату: %s", chat_id, e)
+        try:
+            await processing.delete()
+        except Exception:
+            pass
     except ai.AIError as e:
         log.error("chat=%s: AI помилка чату: %s", chat_id, e)
         try:

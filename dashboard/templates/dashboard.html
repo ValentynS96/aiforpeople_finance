@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Фінанси — {{ iban_mask }}</title>
-<link rel="stylesheet" href="/static/style.css?v=9">
+<title>✨ AI Фінанси — {{ iban_mask }}</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✨</text></svg>">
+<link rel="stylesheet" href="/static/style.css?v=10">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -108,11 +109,11 @@
       <div class="charts-grid">
         <div class="chart-card">
           <div class="chart-title">Витрати за категоріями</div>
-          <div class="chart-wrap"><canvas id="catChart"></canvas></div>
+          <div class="chart-wrap"><div class="chart-skeleton" data-for="catChart"></div><canvas id="catChart"></canvas></div>
         </div>
         <div class="chart-card">
           <div class="chart-title">Надходження vs Витрати по тижнях</div>
-          <div class="chart-wrap"><canvas id="weeklyChart"></canvas></div>
+          <div class="chart-wrap"><div class="chart-skeleton" data-for="weeklyChart"></div><canvas id="weeklyChart"></canvas></div>
         </div>
       </div>
 
@@ -166,6 +167,9 @@
           <button class="suggestion-chip" data-q="Скільки всього я витратив?">💸 Усього витрат</button>
           <button class="suggestion-chip" data-q="Яка моя найбільша категорія витрат?">🏆 Найбільша витрата</button>
           <button class="suggestion-chip" data-q="Є аномалії у моїх фінансах?">🚨 Аномалії</button>
+          <button class="suggestion-chip" data-q="Скільки я заплатив податків?">🧾 Податки</button>
+          <button class="suggestion-chip" data-q="Порівняй останні два місяці: дохід і витрати">📊 Порівняй місяці</button>
+          <button class="suggestion-chip" data-q="Покажи розбивку по моїх рахунках">🏦 По рахунках</button>
         </div>
         <form class="chat-input-row" id="chatForm">
           <input type="text" id="chatInput" placeholder="Напишіть питання..." autocomplete="off">
@@ -202,6 +206,13 @@
           <input type="text" id="historyChatInput" placeholder="Напишіть повідомлення..." autocomplete="off">
           <button class="btn small" type="submit" onclick="sendHistoryMessage()">→</button>
         </form>
+        <div class="chat-suggestions">
+          <button class="suggestion-chip" data-q="Скільки всього я витратив?">💸 Усього витрат</button>
+          <button class="suggestion-chip" data-q="Яка моя найбільша категорія витрат?">🏆 Найбільша витрата</button>
+          <button class="suggestion-chip" data-q="Є аномалії у моїх фінансах?">🚨 Аномалії</button>
+          <button class="suggestion-chip" data-q="Скільки я заплатив податків?">🧾 Податки</button>
+          <button class="suggestion-chip" data-q="Покажи розбивку по моїх рахунках">🏦 По рахунках</button>
+        </div>
       </div>
     </div>
   </div>
@@ -209,6 +220,6 @@
 </div>
 
 <script src="/static/dashboard.js?v=10"></script>
-<script src="/static/chat.js?v=7"></script>
+<script src="/static/chat.js?v=8"></script>
 </body>
 </html>

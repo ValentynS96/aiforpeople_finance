@@ -144,7 +144,7 @@ def _detect_account(query: str, ibans: list[str]) -> str | None:
     return None
 
 
-def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 10) -> str:
+def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 30) -> str:
     """FTS5-поиск транзакций по словам вопроса → блок для промпта чата (RAG).
 
     Возвращает '' если запрос пустой или ничего не нашлось.
@@ -235,6 +235,34 @@ def _counterparties_block(iban: str, max_lines: int = 40) -> str:
     return "  Контрагенти (агреговано за описом):\n    " + "\n    ".join(lines) + suffix + "\n"
 
 
+
+def _months_block(txs: list[dict], max_months: int = 12) -> str:
+    """Помісячна розбивка: дохід/витрати + топ-3 категорії витрат кожного місяця.
+
+    Закриває питання «порівняй місяці» і «топ трати по місяцях»."""
+    from bot import ai_engine as ai
+    by_month: dict[str, dict] = {}
+    for t in txs:
+        ym = (t.get("date") or "")[:7]
+        if len(ym) == 7:
+            m = by_month.setdefault(ym, {"inc": 0.0, "exp": 0.0, "cat": {}})
+            amt = t.get("amount") or 0
+            if amt > 0:
+                m["inc"] += amt
+            else:
+                m["exp"] += abs(amt)
+                cat = t.get("category") or "інше"
+                m["cat"][cat] = m["cat"].get(cat, 0.0) + abs(amt)
+    if not by_month:
+        return ""
+    items = sorted(by_month.items())[-max_months:]
+    parts = []
+    for ym, v in items:
+        top = sorted(v["cat"].items(), key=lambda x: -x[1])[:3]
+        top_s = ", ".join(f"{c} {ai.fmt(s)}" for c, s in top) if top else "—"
+        parts.append(f"{ym}: +{ai.fmt(v['inc'])}/−{ai.fmt(v['exp'])} (топ: {top_s})")
+    return "  По місяцях (дохід/витрати + топ-категорії витрат): " + "; ".join(parts) + "\n"
+
 def get_summary_for_user(chat_id: str) -> str:
     """Текст-сводка по всем счетам пользователя. Для системного промпта ИИ-чата.
 
@@ -272,6 +300,8 @@ def get_summary_for_user(chat_id: str) -> str:
             f"  Виручка: {income} | Витрати: {expense} | Прибуток: {profit} грн\n"
             f"  Транзакцій: {metrics['tx_count']}\n"
         )
+        # помісячна розбивка — для питань «порівняй місяці»
+        line += _months_block(txs)
         # контрагенты (для вопросов про конкретных клиентов)
         line += _counterparties_block(a["iban"])
         # топ-3 категорії витрат
@@ -353,6 +383,7 @@ def get_summary_by_iban(iban: str) -> str:
         f"  Виручка: {income} | Витрати: {expense} | Прибуток: {profit} грн\n"
         f"  Транзакцій: {metrics['tx_count']}\n"
     )
+    line += _months_block(txs)
     # контрагенты (для вопросов про конкретных клиентов)
     line += _counterparties_block(iban)
     by_cat = [(c, v["expense"]) for c, v in metrics["by_cat"].items() if v["expense"] > 0]

@@ -114,13 +114,26 @@ async function loadMetrics() {
 }
 
 function renderKPIs(m) {
-  document.getElementById('kpiIncome').textContent = fmtMoney(m.income);
-  document.getElementById('kpiExpense').textContent = fmtMoney(m.expenses);
-  document.getElementById('kpiProfit').textContent = fmtMoney(m.profit);
-  document.getElementById('kpiMargin').textContent = m.margin + '%';
-  document.getElementById('kpiTxCount').textContent = m.tx_count;
+  // анімація «накручування» цифр — ефект живого підрахунку ШІ
+  countUp(document.getElementById('kpiIncome'), m.income, v => fmtMoney(v));
+  countUp(document.getElementById('kpiExpense'), m.expenses, v => fmtMoney(v));
+  countUp(document.getElementById('kpiProfit'), m.profit, v => fmtMoney(v));
+  countUp(document.getElementById('kpiMargin'), m.margin, v => Math.round(v) + '%', 700);
+  countUp(document.getElementById('kpiTxCount'), m.tx_count, v => Math.round(v), 700);
   document.getElementById('kpiTopCat').textContent = m.top_category && m.top_category !== '—'
     ? '🏆 ' + m.top_category : '';
+}
+
+function countUp(el, target, formatter, dur = 900) {
+  if (!el) return;
+  const t0 = performance.now();
+  function frame(now) {
+    const p = Math.min(1, (now - t0) / dur);
+    const eased = 1 - Math.pow(1 - p, 3);   // плавне прискорення-гальмування
+    el.textContent = formatter(target * eased);
+    if (p < 1) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
 }
 
 function renderAlerts(alerts) {
@@ -131,8 +144,14 @@ function renderAlerts(alerts) {
   list.innerHTML = alerts.map(a => `<div class="alert-item">${a}</div>`).join('');
 }
 
+function dropSkeleton(canvasId) {
+  const sk = document.querySelector(`.chart-skeleton[data-for="${canvasId}"]`);
+  if (sk) sk.remove();
+}
+
 function renderCategoryChart(cats) {
   const ctx = document.getElementById('catChart');
+  dropSkeleton('catChart');
   if (charts.cat) charts.cat.destroy();
   if (!cats.length) return;
   charts.cat = new Chart(ctx, {
@@ -153,6 +172,7 @@ function renderCategoryChart(cats) {
 
 function renderWeeklyChart(weekly) {
   const ctx = document.getElementById('weeklyChart');
+  dropSkeleton('weeklyChart');
   if (charts.weekly) charts.weekly.destroy();
   if (!weekly.length) return;
   charts.weekly = new Chart(ctx, {

@@ -18,11 +18,43 @@ if (chatForm) {
     chatInput.value = '';  // чистим сразу — не ждём ответа ИИ
     await sendChatMessage(msg, 'mini');
   });
-  document.querySelectorAll('.suggestion-chip').forEach(chip => {
-    chip.addEventListener('click', async () => {
-      await sendChatMessage(chip.dataset.q, 'mini');
-    });
+}
+
+// чіпи швидких питань — для обох панелей (міні-чат + історія)
+document.querySelectorAll('.suggestion-chip').forEach(chip => {
+  chip.addEventListener('click', async () => {
+    const isHistory = chip.closest('#historyView') !== null;
+    await sendChatMessage(chip.dataset.q, isHistory ? 'history' : 'mini');
   });
+});
+
+// --- «ШІ думає»: анімовані крапки + обертові фрази ---
+const THINKING_PHRASES = [
+  'Аналізую ваші транзакції…',
+  'Звертаюсь до виписки…',
+  'Порівнюю категорії…',
+  'Рахую суми…',
+  'Майже готово…',
+];
+function makeThinking(container) {
+  const div = document.createElement('div');
+  div.className = 'chat-msg assistant thinking';
+  div.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>' +
+                  '<span class="typing-text"></span>';
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  let i = 0;
+  const label = div.querySelector('.typing-text');
+  label.textContent = THINKING_PHRASES[0];
+  div._timer = setInterval(() => {
+    i = (i + 1) % THINKING_PHRASES.length;
+    label.textContent = THINKING_PHRASES[i];
+  }, 2200);
+  return div;
+}
+function stopThinking(el) {
+  if (el && el._timer) clearInterval(el._timer);
+  if (el) el.remove();
 }
 
 // --- Отправка сообщения (общая для мини-чата и истории) ---
@@ -33,8 +65,7 @@ async function sendChatMessage(message, source = 'mini') {
   if (!container) return;
 
   appendMsg('user', message, container);
-  const typing = appendMsg('assistant', '🤔 Думаю...', container);
-  typing.classList.add('typing');
+  const typing = makeThinking(container);
 
   try {
     const body = { message };
@@ -45,7 +76,7 @@ async function sendChatMessage(message, source = 'mini') {
       body: JSON.stringify(body),
     });
     const data = await r.json();
-    typing.remove();
+    stopThinking(typing);
     if (!r.ok) {
       appendMsg('error', data.error || 'Помилка', container);
     } else {
@@ -58,7 +89,7 @@ async function sendChatMessage(message, source = 'mini') {
       if (source === 'history') loadSessions();
     }
   } catch (e) {
-    typing.remove();
+    stopThinking(typing);
     appendMsg('error', 'Не вдалося зв\'язатись з сервером.', container);
   }
 }
@@ -80,7 +111,16 @@ async function sendHistoryMessage() {
 function appendMsg(role, text, container) {
   const div = document.createElement('div');
   div.className = `chat-msg ${role}`;
-  div.textContent = text;
+  if (role === 'assistant') {
+    // мини-markdown: **жирні цифри** + переноси рядків (спочатку екрануємо HTML)
+    const safe = text
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    div.innerHTML = safe
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/\n/g, '<br>');
+  } else {
+    div.textContent = text;
+  }
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
   return div;
