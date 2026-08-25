@@ -132,7 +132,8 @@ def _fts_available(conn) -> bool:
 
 
 def search_transactions(q: str, iban: str = "", limit: int = 200, *,
-                        stems: bool = False, op: str = "AND") -> list[dict]:
+                        stems: bool = False, op: str = "AND",
+                        owner: str = "") -> list[dict]:
     """Полнотекстовый поиск по описанию и категории транзакций.
 
     FTS5 с префиксными токенами; LIKE-fallback если FTS5 нет.
@@ -150,7 +151,10 @@ def search_transactions(q: str, iban: str = "", limit: int = 200, *,
                 "WHERE transactions_fts MATCH ?"
             )
             params: list = [fts]
-            if iban and iban != "all":
+            if owner:
+                sql += " AND t.owner = ?"
+                params.append(owner)
+            elif iban and iban != "all":
                 sql += " AND t.iban = ?"
                 params.append(iban)
             sql += " ORDER BY t.date DESC LIMIT ?"
@@ -159,7 +163,10 @@ def search_transactions(q: str, iban: str = "", limit: int = 200, *,
         # LIKE-fallback
         sql = "SELECT * FROM transactions WHERE (description LIKE ? OR category LIKE ?)"
         params = [like, like]
-        if iban and iban != "all":
+        if owner:
+            sql += " AND owner = ?"
+            params.append(owner)
+        elif iban and iban != "all":
             sql += " AND iban = ?"
             params.append(iban)
         sql += " ORDER BY date DESC LIMIT ?"
@@ -322,6 +329,9 @@ def init_db():
         """)
         # --- миграции (добавляем колонки, если их ещё нет; идемпотентно) ---
         _add_column_if_missing(conn, "transactions", "iban", "TEXT")
+        # власник-кабінет (телефон/chat_id, хто загрузив) — ізоляція даних клієнтів
+        _add_column_if_missing(conn, "transactions", "owner", "TEXT")
+        _try_create_index(conn, "idx_tx_owner", "transactions(owner)")
         _try_create_index(conn, "idx_tx_iban", "transactions(iban)")
         _add_column_if_missing(conn, "transactions", "country", "TEXT")
         _try_create_index(conn, "idx_tx_country", "transactions(country)")
@@ -352,6 +362,11 @@ def init_db():
                     )
             except (json.JSONDecodeError, TypeError):
                 pass
+
+        # backfill: власник = chat_id сесії загрузки (для старих даних)
+        conn.execute("""UPDATE transactions SET owner = (
+                          SELECT s.chat_id FROM sessions s WHERE s.id = transactions.session_id)
+                        WHERE owner IS NULL OR owner = ''""")
 
         # FTS5-индексы (после создания всех таблиц)
         _init_fts(conn)
@@ -389,22 +404,38 @@ def list_sessions(limit: int = 100) -> list[dict]:
 # ============================================================
 # Транзакции
 # ============================================================
-def add_transactions(session_id: int, transactions: list[dict], iban: str = ""):
+def add_transactions(session_id: int, transactions: list[dict], iban: str = "",
+                     owner: str = "") -> tuple[int, int]:
     """Пакетная вставка транзакций. Каждая: {date, description, amount, type, category, week, country}.
     iban: если задан, проставляется всем транзакциям этой партии.
-    country: читается из t["country"] (если есть), иначе ''. Дефолт 'UA' задаёт AI."""
+    owner: кабинет-владелец (телефон) — изоляция данных между клиентами.
+    Дедупликация: строки (дата, опис, сума), які ВЖЕ є у цього власця по цьому
+    рахунку, пропускаються (повторна загрузка того ж файлу нічого не додає).
+    Возвращает (вставлено, пропущено_дублікатів)."""
     if not transactions:
-        return
-    rows = [
-        (session_id, t["date"], t["description"], t["amount"],
-         t["type"], t["category"], t.get("week", ""), iban, t.get("country", ""))
-        for t in transactions
-    ]
+        return (0, 0)
     with _lock, get_conn() as conn:
+        existing = set()
+        if owner:
+            rows_db = conn.execute(
+                "SELECT date, description, amount FROM transactions WHERE owner = ?",
+                (owner,)).fetchall()
+            existing = {(r["date"], r["description"], r["amount"]) for r in rows_db}
+        fresh, skipped = [], 0
+        for t in transactions:
+            key = (t["date"], t["description"], t["amount"])
+            if key in existing:
+                skipped += 1
+                continue
+            existing.add(key)
+            fresh.append((session_id, t["date"], t["description"], t["amount"],
+                          t["type"], t["category"], t.get("week", ""), iban,
+                          t.get("country", ""), owner))
+        rows = fresh
         conn.executemany(
             """INSERT INTO transactions
-               (session_id, date, description, amount, type, category, week, iban, country)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (session_id, date, description, amount, type, category, week, iban, country, owner)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         conn.execute(
@@ -412,6 +443,7 @@ def add_transactions(session_id: int, transactions: list[dict], iban: str = ""):
             "(SELECT COUNT(*) FROM transactions WHERE session_id = ?) WHERE id = ?",
             (session_id, session_id),
         )
+    return (len(rows), skipped)
 
 
 def get_transactions(*, date_from: str = "", date_to: str = "",
@@ -423,12 +455,12 @@ def get_transactions(*, date_from: str = "", date_to: str = "",
     month: "YYYY-MM" (напр. "2026-03") — фильтр по месяцу.
     year: "YYYY" (напр. "2026") — фильтр по году.
     """
-    sql = "SELECT t.* FROM transactions t"
+    sql = "SELECT t.* FROM transactions t WHERE 1=1"
     params: list = []
     if chat_id:
-        sql += " JOIN accounts a ON t.iban = a.iban AND a.chat_id = ?"
+        # ізоляція кабінету: лише транзакції, загружені цим власником
+        sql += " AND t.owner = ?"
         params.append(chat_id)
-    sql += " WHERE 1=1"
     if date_from:
         sql += " AND t.date >= ?"
         params.append(date_from)
@@ -495,7 +527,7 @@ def delete_iban_data(iban: str) -> dict:
         }
 
 
-def get_counterparties(iban: str = "", limit: int = 60) -> list[dict]:
+def get_counterparties(iban: str = "", limit: int = 60, owner: str = "") -> list[dict]:
     """Агрегация транзакций по описанию (контрагентам) — для контекста ИИ-чата.
 
     Позволяет отвечать на вопросы вида «сколько принёс клиент #5619»:
@@ -509,7 +541,10 @@ def get_counterparties(iban: str = "", limit: int = 60) -> list[dict]:
         "FROM transactions WHERE description IS NOT NULL AND description != ''"
     )
     params: list = []
-    if iban and iban != "all":
+    if owner:
+        sql += " AND owner = ?"
+        params.append(owner)
+    elif iban and iban != "all":
         sql += " AND iban = ?"
         params.append(iban)
     sql += " GROUP BY description ORDER BY (income + expense) DESC LIMIT ?"
@@ -534,7 +569,7 @@ def get_periods(iban: str = "", chat_id: str = "") -> dict:
     sql = "SELECT DISTINCT substr(date,1,7) as ym FROM transactions WHERE date IS NOT NULL AND length(date) >= 7"
     params: list = []
     if chat_id:
-        sql += " AND iban IN (SELECT iban FROM accounts WHERE chat_id = ?)"
+        sql += " AND owner = ?"
         params.append(chat_id)
     elif iban and iban != "all":
         sql += " AND iban = ?"
@@ -794,11 +829,11 @@ def account_stats(chat_id: str = "") -> list[dict]:
                           COALESCE(SUM(CASE WHEN t.amount > 0 THEN t.amount END), 0) AS income,
                           COALESCE(SUM(CASE WHEN t.amount < 0 THEN ABS(t.amount) END), 0) AS expense
                    FROM accounts a
-                   LEFT JOIN transactions t ON t.iban = a.iban
+                   LEFT JOIN transactions t ON t.iban = a.iban AND t.owner = ?
                    WHERE a.chat_id = ?
                    GROUP BY a.iban, a.holder
                    ORDER BY a.first_seen""",
-                (chat_id,),
+                (chat_id, chat_id),
             ).fetchall()
         else:
             rows = conn.execute(

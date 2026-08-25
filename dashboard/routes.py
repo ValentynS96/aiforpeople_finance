@@ -560,7 +560,10 @@ async def api_upload(request: Request):
         # --- ЭТАП 4: Сохранение (в кабинет пользователя) ---
         yield send("step", {"step": "save", "status": "active",
                             "message": "💾 Зберігаю в базу даних..."})
-        db_bridge.save_result(transactions, chat_id=ws_id, username=ws_label, iban=target_iban)
+        res = db_bridge.save_result(transactions, chat_id=ws_id,
+                                    username=ws_label, iban=target_iban) or {}
+        inserted = res.get("inserted", len(transactions))
+        skipped = res.get("skipped", 0)
         yield send("step", {"step": "save", "status": "done",
                             "message": "✅ Збережено в дашборд"})
 
@@ -577,9 +580,10 @@ async def api_upload(request: Request):
         thresholds = db_bridge.get_alert_thresholds()
         anomalies = ai.detect_anomalies(metrics, thresholds)
 
+        dup_note = f" · {skipped} дублікатів пропущено" if skipped else ""
         yield send("done", {
             "ok": True,
-            "tx_count": len(transactions),
+            "tx_count": inserted,
             "total_tx": len(all_tx),
             "income": round(metrics["income"], 2),
             "expenses": round(metrics["expenses"], 2),
@@ -703,12 +707,17 @@ async def _process_first_upload(job_id: str, content: bytes, filename: str,
                      details=f"{filename}: {len(transactions)} транзакцій")
 
         update(step="save", status="running", message="💾 Зберігаю...")
-        db_bridge.save_result(transactions, chat_id=ws_id or iban,
-                              username=ws_label or "(web)", iban=iban)
+        res = db_bridge.save_result(transactions, chat_id=ws_id or iban,
+                                    username=ws_label or "(web)", iban=iban) or {}
+        inserted = res.get("inserted", len(transactions))
+        skipped = res.get("skipped", 0)
         db_bridge.auto_export_to_sheets(transactions)
 
+        done_msg = f"✅ Готово! {inserted} нових транзакцій"
+        if skipped:
+            done_msg += f" ({skipped} дублікатів пропущено)"
         update(status="done", step="save", iban=iban,
-               tx_count=len(transactions), message="✅ Готово!")
+               tx_count=inserted, message=done_msg)
         _log.info("first-upload %s: готово, iban=%s, tx=%d", job_id, mask(iban), len(transactions))
     except ai.AIError as e:
         _log.error("first-upload %s: AI помилка: %s", job_id, e)
@@ -912,6 +921,25 @@ def _admin_back(ok: bool, msg: str, anchor: str = "access") -> RedirectResponse:
     from urllib.parse import quote
     return RedirectResponse(f"/admin?ok={1 if ok else 0}&msg={quote(msg)}#{anchor}",
                             status_code=303)
+
+
+@router.post("/admin/provider")
+async def admin_set_provider(request: Request, provider: str = Form(...)):
+    """Перемикає провайдера ШІ (google = Gemini API / deepseek)."""
+    redir = auth.require_auth(request)
+    if redir:
+        return redir
+    from bot import db_bridge
+    from bot.ai_engine import PROVIDERS
+    provider = provider.lower()
+    if provider not in PROVIDERS:
+        return _admin_back(False, f"Помилка: невідомий провайдер «{provider[:20]}»", anchor="secrets")
+    db_bridge.set_ai_provider(provider)
+    db.log_usage("адмін", "змінено провайдера ШІ", source="admin",
+                 details=f"{provider} · модель за замовчуванням: {PROVIDERS[provider]['default_model']}")
+    return _admin_back(True, f"Провайдера змінено: {provider}. "
+                             f"Модель: {PROVIDERS[provider]['default_model']}. "
+                             f"Не забудьте ключ відповідного провайдера нижче.", anchor="secrets")
 
 
 @router.post("/admin/grants/{gid}/level")
@@ -1202,7 +1230,8 @@ async def admin_login_submit(request: Request, password: str = Form(...)):
 
 @router.get("/admin/logout")
 async def admin_logout():
-    resp = RedirectResponse("/admin/login", status_code=303)
+    # вихід → на головну сторінку системи (передбачувано для користувача)
+    resp = RedirectResponse("/", status_code=303)
     auth.logout(resp)
     return resp
 
@@ -1248,6 +1277,9 @@ async def admin_page(request: Request):
         "grant_levels": db.GRANT_LEVELS,
         "accounts": db.account_stats(),
         "allow_iban_login": bool(db.get_setting("allow_iban_login", False)),
+        "ai_provider": (db.get_setting("ai_provider") or "deepseek").lower(),
+        "ai_provider_label": {"google": "Google Gemini API", "deepseek": "DeepSeek API"}
+                             .get((db.get_setting("ai_provider") or "deepseek").lower(), "DeepSeek API"),
         "notice": request.query_params.get("msg", ""),
         "notice_ok": request.query_params.get("ok", "1") == "1",
     })

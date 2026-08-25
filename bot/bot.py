@@ -320,8 +320,14 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
 
         # 5. Сохранить с IBAN (в кабинет: телефон клиента / chat_id владельца)
         username = tg_label
-        session_id = db_bridge.save_result(transactions, ws_id, username, iban=iban)
-        db_saved = session_id is not None
+        res = db_bridge.save_result(transactions, ws_id, username, iban=iban) or {}
+        db_saved = res.get("session_id") is not None
+        inserted = res.get("inserted", len(transactions))
+        skipped = res.get("skipped", 0)
+        if skipped:
+            await processing.edit_text(
+                f"💾 Збережено: {inserted} нових транзакцій "
+                f"(ще {skipped} дублікатів пропущено — цей файл уже був)")
 
         # 5б. Автоэкспорт в Google Sheets (если включён в админке; не валит бота)
         sheets_ok = db_bridge.auto_export_to_sheets(transactions)

@@ -342,12 +342,34 @@
     <p class="desc">Зберігаються зашифрованими. Заповнюйте тільки те, що хочете змінити — порожнє поле не затирає.</p>
     <form method="post" action="/admin/secrets">
       <div class="form-row">
-        <label>DeepSeek API Key
+        <label>API-ключ ШІ
           {% if secret_status.deepseek_key %}
           <span class="secret-status set">● налаштований</span>
           {% else %}<span class="secret-status empty">○ не заданий</span>{% endif %}
         </label>
-        <input type="password" name="deepseek_key" placeholder="sk-...">
+        <input type="password" name="deepseek_key"
+               placeholder="{% if ai_provider == 'google' %}AI-ключ Google (aistudio.google.com){% else %}sk-...{% endif %}">
+        <span class="hint">Активний провайдер: <b>{{ ai_provider_label }}</b>.
+          {% if ai_provider == 'google' %}Ключ з aistudio.google.com (Gemini API).
+          Для гарантії «дані не використовуються для навчання» має бути
+          прив'язаний білінг-акаунт (платний тариф).
+          {% else %}Ключ з platform.deepseek.com.{% endif %}</span>
+      </div>
+      <div class="form-row">
+        <label>Провайдер ШІ</label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <select name="provider_select" id="providerSelect"
+                  style="flex:1;padding:11px 14px;border-radius:8px;background:var(--bg);
+                         color:var(--text);border:1px solid var(--border);">
+            <option value="google" {% if ai_provider == 'google' %}selected{% endif %}>
+              Google Gemini API (платний = без навчання на даних)</option>
+            <option value="deepseek" {% if ai_provider == 'deepseek' %}selected{% endif %}>
+              DeepSeek API (запасний)</option>
+          </select>
+          <button class="btn secondary small" type="button" onclick="switchProvider()">Перемкнути</button>
+        </div>
+        <span class="hint">Перемикання встановлює модель за замовчуванням нового провайдера
+          (потім уточніть у секції «🧠 Модель AI»).</span>
       </div>
       <div class="form-row">
         <label>Telegram Bot Token
@@ -734,6 +756,15 @@ async function sendReportNow() {
 }
 
 loadAccounts();
+</script>
+<script>
+function switchProvider() {
+  const p = document.getElementById('providerSelect').value;
+  const f = document.createElement('form');
+  f.method = 'POST'; f.action = '/admin/provider';
+  const i = document.createElement('input'); i.name = 'provider'; i.value = p;
+  f.appendChild(i); document.body.appendChild(f); f.submit();
+}
 </script>
 </body>
 </html>

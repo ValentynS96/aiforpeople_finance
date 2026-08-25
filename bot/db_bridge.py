@@ -41,11 +41,12 @@ def _iso_week(date_str: str) -> str:
 
 
 def save_result(transactions: list[dict], chat_id: str, username: str = "",
-                iban: str = "") -> int | None:
+                iban: str = "") -> dict | None:
     """Сохраняет результат обработки выписки в БД.
 
     iban: если задан — регистрирует счёт (привязка к chat_id) и проставляет
-    всем транзакциям. Возвращает session_id или None при ошибке.
+    всем транзакциям. chat_id одновременно = владелец-кабинет (изоляция данных).
+    Возвращает {"session_id", "inserted", "skipped"} или None при ошибке.
     """
     if not transactions:
         return None
@@ -60,11 +61,12 @@ def save_result(transactions: list[dict], chat_id: str, username: str = "",
             if iban:
                 row["iban"] = iban
             enriched.append(row)
-        db.add_transactions(sid, enriched, iban=iban)
+        inserted, skipped = db.add_transactions(sid, enriched, iban=iban, owner=chat_id)
         if iban:
             db.register_account(chat_id, iban)
-        _log.info("Сессия %s: сохранено %d транзакций (iban=%s)", sid, len(enriched), iban or "—")
-        return sid
+        _log.info("Сессия %s: сохранено %d транзакций (%d дублікатів пропущено, iban=%s)",
+                  sid, inserted, skipped, iban or "—")
+        return {"session_id": sid, "inserted": inserted, "skipped": skipped}
     except Exception as e:
         _log.error("Не удалось сохранить в БД: %s", e)
         return None
@@ -161,9 +163,10 @@ def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 30
         q = " ".join(words + extra)
     from bot import ai_engine as ai
 
+    owner = str(chat_id) if chat_id else ""
     ibans = [iban] if iban and iban != "all" else []
-    if not ibans and chat_id:
-        ibans = [a["iban"] for a in db.list_accounts(chat_id=str(chat_id))]
+    if not ibans and owner:
+        ibans = [a["iban"] for a in db.list_accounts(chat_id=owner)]
     if not ibans:
         ibans = [""]
 
@@ -182,7 +185,8 @@ def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 30
         try:
             # stems+OR: нечёткий поиск — стволы слов, хотя бы одно совпадение
             # («військового збору» → військ* OR збору* → «Військовий збір»)
-            for t in db.search_transactions(q, iban=ib, limit=100, stems=True, op="OR"):
+            for t in db.search_transactions(q, iban=ib, limit=100, stems=True, op="OR",
+                                            owner=owner):
                 d = t["description"] or "—"
                 key = (d, ib if multi else "")    # окремі рядки по рахунках, якщо їх кілька
                 if key not in agg:
@@ -212,14 +216,14 @@ def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 30
             "ЗНАЙДЕНО ЗА ЗАПИТОМ КОРИСТУВАЧА (це точні дані з транзакцій):\n  " + "\n  ".join(lines))
 
 
-def _counterparties_block(iban: str, max_lines: int = 40) -> str:
+def _counterparties_block(iban: str, max_lines: int = 40, owner: str = "") -> str:
     """Блок «контрагенты» для контекста чата: топ по обороту.
 
     Даёт ИИ возможность отвечать на вопросы про конкретных клиентов/продавцов
     («сколько принёс клиент #5619», «кому я больше плачу»).
     """
     from bot import ai_engine as ai
-    cps = db.get_counterparties(iban=iban, limit=60)
+    cps = db.get_counterparties(iban=iban, limit=60, owner=owner)
     if not cps:
         return ""
     lines = []
@@ -303,7 +307,7 @@ def get_summary_for_user(chat_id: str) -> str:
         # помісячна розбивка — для питань «порівняй місяці»
         line += _months_block(txs)
         # контрагенты (для вопросов про конкретных клиентов)
-        line += _counterparties_block(a["iban"])
+        line += _counterparties_block(a["iban"], owner=chat_id)
         # топ-3 категорії витрат
         by_cat = [(c, v["expense"]) for c, v in metrics["by_cat"].items() if v["expense"] > 0]
         by_cat.sort(key=lambda x: x[1], reverse=True)
@@ -428,9 +432,9 @@ def get_categories() -> list[str]:
 
 
 def get_deepseek_model() -> str:
-    """Модель DeepSeek из БД (или безопасный дефолт)."""
+    """Активна модель ШІ з БД (або дефолт активного провайдера)."""
     from bot import ai_engine
-    return db.get_setting("deepseek_model", "") or ai_engine.DEEPSEEK_DEFAULT_MODEL
+    return db.get_setting("deepseek_model", "") or ai_engine.default_model()
 
 
 def set_deepseek_model(model: str):
@@ -522,3 +526,18 @@ def mask_phone(phone: str) -> str:
 
 
 GRANT_LEVELS = db.GRANT_LEVELS
+
+
+# ============================================================
+# Провайдер ШІ (google / deepseek) — перемикач в адмінці
+# ============================================================
+def get_ai_provider() -> str:
+    return db.get_setting("ai_provider") or "deepseek"
+
+
+def set_ai_provider(name: str):
+    from bot import ai_engine as ai
+    db.set_setting("ai_provider", name if name in ai.PROVIDERS else "deepseek")
+    ai.reset_provider_cache()
+    # модель за замовчуванням нового провайдера (актуальну завжди можна змінити)
+    db.set_setting("deepseek_model", ai.PROVIDERS.get(name, ai.PROVIDERS["deepseek"])["default_model"])

@@ -75,6 +75,61 @@ DASHBOARD_URL = "https://finance.aiforpeople.expert"  # посилання в п
 DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"  # безопасный дефолт; реальная — из БД/админки
 
+# --- Провайдери ШІ (обидва говорять у форматі OpenAI chat/completions) ---
+# google: Gemini API (платний тариф = Google НЕ навчається на даних;
+#         має офіційний OpenAI-сумісний endpoint)
+# deepseek: оригінальний провайдер (залишається як запасний)
+PROVIDERS = {
+    "deepseek": {"base": "https://api.deepseek.com", "default_model": DEEPSEEK_DEFAULT_MODEL},
+    "google": {"base": "https://generativelanguage.googleapis.com/v1beta/openai",
+               "default_model": "gemini-2.5-flash"},
+}
+_PROVIDER_CACHE: dict | None = None
+
+
+def current_provider() -> dict:
+    """Активний провайдер: {'name', 'base', 'default_model'} з БД-налаштування."""
+    global _PROVIDER_CACHE
+    if _PROVIDER_CACHE is None:
+        try:
+            from dashboard import db as _db
+            name = (_db.get_setting("ai_provider") or "deepseek").lower()
+        except Exception:
+            name = "deepseek"
+        cfg = PROVIDERS.get(name, PROVIDERS["deepseek"])
+        _PROVIDER_CACHE = {"name": name, **cfg}
+    return _PROVIDER_CACHE
+
+
+def reset_provider_cache():
+    """Викликається після зміни провайдера в адмінці."""
+    global _PROVIDER_CACHE
+    _PROVIDER_CACHE = None
+
+
+def _api_chat_url() -> str:
+    return current_provider()["base"] + "/chat/completions"
+
+
+def _api_models_url() -> str:
+    return current_provider()["base"] + "/models"
+
+
+def default_model() -> str:
+    return current_provider()["default_model"]
+
+
+def _strip_thoughts(content: str) -> str:
+    """Прибирає блок роздумів моделей-«думаків» (Gemma: <thought>…</thought>).
+
+    Відповідь завжди після закривального </thought>.
+    """
+    if "</thought>" in content:
+        content = content.rsplit("</thought>", 1)[1]
+    if content.startswith("<thought>"):          # незакритий блок (обірвалась генерація)
+        content = ""
+    return content.strip()
+
 # Великі виписки категоризуємо ЧАСТИНАМИ: один запит на всю виписку змушує
 # DeepSeek генерувати гігантський JSON (десятки тисяч токенів) — це повільно,
 # дорого, і такий запит регулярно повертає порожню відповідь.
@@ -181,6 +236,46 @@ def _merge_usage(meta: dict | None, usage: dict, seconds: float, model: str):
     meta["model"] = model or DEEPSEEK_DEFAULT_MODEL
 
 
+
+# Моделі-запаси: якщо активна модель віддає 5xx/429 (перебої балансувальника
+# Google), автоматично пробуємо наступну з цього списку.
+_FALLBACK_MODELS = {
+    "google": ["gemini-3.1-flash-lite", "gemma-4-26b-a4b-it"],
+    "deepseek": [],
+}
+
+
+def _post_chat(payload: dict, api_key: str, timeout: int):
+    """POST chat/completions з retry + fallback-моделями.
+
+    Повертає (json, модель_яка_відповіла, секунди). Кидає AIError, якщо
+    всі моделі недоступні.
+    """
+    models = [payload.get("model") or default_model()]
+    models += _FALLBACK_MODELS.get(current_provider()["name"], [])
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    last_err = None
+    for m in dict.fromkeys(models):
+        p = dict(payload)
+        p["model"] = m
+        for attempt in range(2):
+            try:
+                t0 = time.monotonic()
+                resp = requests.post(_api_chat_url(), json=p, headers=headers, timeout=timeout)
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    if attempt == 0:
+                        time.sleep(2.5)          # коротка пауза — часто досить
+                        continue
+                    last_err = f"{m}: HTTP {resp.status_code}"
+                    break                        # наступна модель
+                resp.raise_for_status()
+                return resp.json(), m, time.monotonic() - t0
+            except requests.RequestException as e:
+                last_err = f"{m}: {e}"
+                if attempt == 0:
+                    time.sleep(2.5)
+    raise AIError(f"{current_provider()['name']} API недоступний: {last_err}")
+
 def categorize(text: str, api_key: str, *, timeout: int = 300,
                categories: list[str] | None = None,
                model: str = "",
@@ -251,7 +346,7 @@ def _categorize_one(text: str, api_key: str, *, timeout: int,
                         f"оброби всі транзакції саме цієї частини]\n\n{text}")
 
     payload = {
-        "model": model or DEEPSEEK_DEFAULT_MODEL,
+        "model": model or default_model(),
         "messages": [
             {"role": "system", "content": build_system_prompt(categories)},
             {"role": "user", "content": user_content},
@@ -259,23 +354,10 @@ def _categorize_one(text: str, api_key: str, *, timeout: int,
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    data, model_used, took = _post_chat(payload, api_key, timeout)
+    _merge_usage(usage_meta, data.get("usage") or {}, took, model_used)
 
-    try:
-        t0 = time.monotonic()
-        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise AIError(f"DeepSeek API недоступний: {e}") from e
-
-    data = resp.json()
-    _merge_usage(usage_meta, data.get("usage") or {}, time.monotonic() - t0,
-                 payload["model"])
-
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    content = _strip_thoughts(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
 
     # Парсинг JSON (DeepSeek іноді обгортає в текст)
     parsed = _extract_json(content)
@@ -377,27 +459,15 @@ def chat(messages: list[dict], api_key: str, *, timeout: int = 60,
         raise AIError("DEEPSEEK_API_KEY не налаштований.")
 
     payload = {
-        "model": model or DEEPSEEK_DEFAULT_MODEL,
+        "model": model or default_model(),
         "messages": messages,
         "temperature": 0.3,  # чуть выше, чем для категоризации — естественнее ответы
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    data, model_used, took = _post_chat(payload, api_key, timeout)
+    _merge_usage(usage_meta, data.get("usage") or {}, took, model_used)
 
-    try:
-        t0 = time.monotonic()
-        resp = requests.post(DEEPSEEK_URL, json=payload, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise AIError(f"DeepSeek API недоступний: {e}") from e
-
-    data = resp.json()
-    _merge_usage(usage_meta, data.get("usage") or {}, time.monotonic() - t0,
-                 payload["model"])
-
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    return _strip_thoughts(raw)
 
 
 async def chat_async(messages: list[dict], api_key: str, *, timeout: int = 60,
@@ -408,22 +478,23 @@ async def chat_async(messages: list[dict], api_key: str, *, timeout: int = 60,
 
 
 def list_models(api_key: str, *, timeout: int = 15) -> list[str]:
-    """Список актуальних моделей з DeepSeek API. Повертає ['deepseek-v4-flash', ...].
+    """Список актуальних моделей активного провайдера. Повертає ['gemma-4-26b-a4b-it', ...].
 
     Используется админкой для заполнения dropdown актуальными именами моделей.
-    Кидає AIError при помилці.
+    Кидає AIError при помилке.
     """
     if not api_key:
-        raise AIError("DEEPSEEK_API_KEY не налаштований.")
+        raise AIError("API-ключ ШІ не налаштований.")
     try:
-        resp = requests.get(DEEPSEEK_MODELS_URL,
+        resp = requests.get(_api_models_url(),
                             headers={"Authorization": f"Bearer {api_key}"},
                             timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException as e:
-        raise AIError(f"DeepSeek API недоступний: {e}") from e
+        raise AIError(f"{current_provider()['name']} API недоступний: {e}") from e
     data = resp.json().get("data", [])
-    return [m["id"] for m in data if "id" in m]
+    # у Google id виглядає як "models/gemma-..." — прибираємо префікс
+    return [m["id"].removeprefix("models/") for m in data if "id" in m]
 
 
 # ============================================================
