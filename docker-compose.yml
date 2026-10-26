@@ -2,7 +2,7 @@ services:
   ai-finansy:
     build: .
     ports:
-      - "8000:8000"
+      - "13500:8000"   # зовнішній порт 13500 (всередині контейнера лишається 8000)
     volumes:
       - ./data:/app/data          # SQLite + мастер-ключ шифрования — persist
     environment:

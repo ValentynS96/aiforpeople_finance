@@ -18,7 +18,6 @@
     <div class="topbar-nav">
       <select class="period-btn" id="accountSwitcher" style="max-width:220px;"
               title="Обрати рахунок" onchange="switchAccount(this.value)"></select>
-      <a href="/admin" title="Налаштування для куратора">⚙️</a>
       <a href="/logout-iban" title="Вийти з іншого рахунку">Вийти</a>
     </div>
   </div>
@@ -124,7 +123,7 @@
         <div class="upload-text">
           Перетягніть виписку сюди або <strong>натисніть для вибору</strong>
         </div>
-        <div class="upload-sub">PDF або CSV — прив'яжеться до рахунку {{ iban_mask }}</div>
+        <div class="upload-sub">PDF або CSV — рахунок визначиться з файлу автоматично</div>
         <div id="uploadStatus"></div>
       </div>
 

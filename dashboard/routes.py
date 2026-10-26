@@ -183,6 +183,7 @@ async def logout_iban():
     resp = RedirectResponse("/", status_code=303)
     auth.clear_iban_session(resp)
     auth.clear_phone_session(resp)
+    auth.logout(resp)   # повний вихід: і з адмінської сесії також
     return resp
 
 
@@ -504,9 +505,12 @@ async def api_upload(request: Request):
         yield send("step", {"step": "parse", "status": "done",
                             "message": f"✅ Розпізнано текст виписки"})
 
-        # --- ЭТАП 2: IBAN проверка (режим «всі рахунки» — без проверки) ---
+        # --- ЭТАП 2: IBAN проверка ---
+        # Пропускається: режим «всі рахунки» та клієнти з мультирахунком
+        # (у них інший IBAN у файлі = додати рахунок, а не помилка).
         file_iban = extract_iban(markdown)
-        if file_iban and iban != "all" and file_iban != iban:
+        multi_ok = bool(pu and pu.get("multi_account"))
+        if file_iban and iban != "all" and not multi_ok and file_iban != iban:
             yield send("error", {"error": f"IBAN у файлі ({mask(file_iban)}) не збігається з вашим рахунком ({mask(iban)})"})
             return
         target_iban = file_iban or (iban if iban != "all" else "")
@@ -902,6 +906,7 @@ async def admin_create_grant(request: Request, phone: str = Form(...),
     if level not in db.GRANT_LEVELS:
         level = "view"
     days_n = None if days in ("", "0", "none") else max(1, min(365, int(days)))
+    back = "/access" if getattr(admin_create_grant, "_back_access", False) else "/admin"
 
     db.create_grant(norm, label.strip()[:60], level, "all", days_n,
                     multi_account=multi_account)
@@ -916,11 +921,14 @@ async def admin_create_grant(request: Request, phone: str = Form(...),
                              f"{'🏦 всі рахунки' if multi_account else '🏦 один рахунок'})")
 
 
-def _admin_back(ok: bool, msg: str, anchor: str = "access") -> RedirectResponse:
-    """Редирект назад в админку с уведомлением (банер) о результате."""
+def _admin_back(ok: bool, msg: str, anchor: str = "access",
+                page: str = "/admin") -> RedirectResponse:
+    """Редирект назад (админка или /access) с уведомлением о результате."""
     from urllib.parse import quote
-    return RedirectResponse(f"/admin?ok={1 if ok else 0}&msg={quote(msg)}#{anchor}",
-                            status_code=303)
+    url = f"{page}?ok={1 if ok else 0}&msg={quote(msg)}"
+    if page == "/admin":
+        url += f"#{anchor}"
+    return RedirectResponse(url, status_code=303)
 
 
 @router.post("/admin/provider")
@@ -1216,8 +1224,11 @@ async def admin_login_page(request: Request):
 
 
 @router.post("/admin/login")
-async def admin_login_submit(request: Request, password: str = Form(...)):
-    resp = RedirectResponse("/admin", status_code=303)
+async def admin_login_submit(request: Request, password: str = Form(...),
+                             next: str = Form("/admin")):
+    # захист від відкритих редиректів — тільки внутрішні шляхи
+    nxt = next if next.startswith("/") and not next.startswith("//") else "/admin"
+    resp = RedirectResponse(nxt, status_code=303)
     ok = auth.login(resp, password)
     db.log_usage("адмін", "вхід в адмінку", source="admin", ok=ok,
                  details="пароль прийнято" if ok else "невірний пароль")
@@ -1226,6 +1237,33 @@ async def admin_login_submit(request: Request, password: str = Form(...)):
     return templates.TemplateResponse(request, "admin_login.html", {
         "error": "Невірний пароль",
     }, status_code=401)
+
+
+# ============================================================
+# Швидка сторінка «Доступи» — тільки видача, без важкої адмінки
+# ============================================================
+@router.get("/access", response_class=HTMLResponse)
+async def access_page(request: Request):
+    """Легкий інструмент видачі доступів (для власника після вебінару)."""
+    if not auth.is_authed(request):
+        return templates.TemplateResponse(request, "access.html", {
+            "need_login": True, "grants": [], "notice": "", "notice_ok": True,
+            "grant_levels": db.GRANT_LEVELS, "counts": {},
+        })
+    grants = db.list_grants()
+    active = [g for g in grants if g["status"] == "active"]
+    return templates.TemplateResponse(request, "access.html", {
+        "need_login": False,
+        "grants": grants[:15],
+        "grant_levels": db.GRANT_LEVELS,
+        "notice": request.query_params.get("msg", ""),
+        "notice_ok": request.query_params.get("ok", "1") == "1",
+        "counts": {
+            "active": len(active),
+            "tg": sum(1 for g in grants if g["telegram_chat_id"]),
+            "total": len(grants),
+        },
+    })
 
 
 @router.get("/admin/logout")
