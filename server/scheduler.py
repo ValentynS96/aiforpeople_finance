@@ -22,6 +22,9 @@ _log = logging.getLogger("scheduler")
 
 _scheduler: AsyncIOScheduler | None = None
 
+# Автоматичний щомісячний звіт тимчасово вимкнено. True — увімкнути знову.
+MONTHLY_REPORT_ENABLED = False
+
 
 def previous_month(now: datetime | None = None) -> str:
     """'YYYY-MM' прошедшего месяца (15.08 → '2026-07', 01.01 → предыдущий год)."""
@@ -87,6 +90,9 @@ async def send_monthly_report(bot_app) -> dict:
 def start_scheduler(bot_app) -> AsyncIOScheduler | None:
     """Стартует планировщик (1-е число, 09:00). None если APScheduler недоступен."""
     global _scheduler
+    if not MONTHLY_REPORT_ENABLED:
+        _log.info("📅 Щомісячний звіт вимкнено (MONTHLY_REPORT_ENABLED = False)")
+        return None
     try:
         _scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
         _scheduler.add_job(

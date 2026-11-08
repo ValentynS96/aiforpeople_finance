@@ -78,8 +78,8 @@ docker compose up -d --build
 | `/report` | P&L-звіт за минулий місяць |
 | `/reset` | Очистити історію чату (транзакції залишаються) |
 
-**Щомісячний звіт:** 1-го числа о 09:00 бот сам надсилає P&L-звіт за
-минулий місяць по кожному рахунку (рахунки без операцій пропускаються).
+**Щомісячний звіт:** автоматична розсилка тимчасово вимкнена — звіт за
+минулий місяць можна отримати командою `/report`.
 
 ## ⚙️ Налаштування
 
@@ -124,6 +124,7 @@ docker compose up -d --build
   веб-дашборд, налаштування, БД · `bot/` — Telegram-бот і рушій ШІ
   (провайдери Google Gemini / DeepSeek, обидва через OpenAI-сумісний API) ·
   `scripts/` — генератор демо-виписки в PDF (`python3 scripts/generate_statement.py`).
-- **Автоматизації:** щомісячний P&L-звіт у Telegram — `server/scheduler.py` (APScheduler).
+- **Автоматизації:** щомісячний P&L-звіт у Telegram — `server/scheduler.py` (APScheduler),
+  зараз вимкнений (`MONTHLY_REPORT_ENABLED = False`).
 - **Збірка на старих машинах:** якщо BuildKit падає з таймаутом —
   `DOCKER_BUILDKIT=0 docker compose build`.
