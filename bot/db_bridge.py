@@ -212,8 +212,25 @@ def find_relevant(query: str, iban: str = "", chat_id: str = "", limit: int = 30
         if v["expense"] > 0:
             parts.append(f"списання {ai.fmt(v['expense'])} грн")
         lines.append(", ".join(parts))
+    # готові суми по категоріях — щоб ШІ не додавав числа сам (помиляється)
+    cat_tot: dict[str, dict] = {}
+    for v in agg.values():
+        c = cat_tot.setdefault(v["category"] or "—", {"count": 0, "income": 0.0, "expense": 0.0})
+        c["count"] += v["count"]
+        c["income"] += v["income"]
+        c["expense"] += v["expense"]
+    tot_lines = []
+    for cat, c in sorted(cat_tot.items(), key=lambda x: -(x[1]["expense"] + x[1]["income"])):
+        parts = [f"- {cat}: {c['count']} плат."]
+        if c["income"] > 0:
+            parts.append(f"надходження {ai.fmt(c['income'])} грн")
+        if c["expense"] > 0:
+            parts.append(f"списання {ai.fmt(c['expense'])} грн")
+        tot_lines.append(", ".join(parts))
     return (scope_note +
-            "ЗНАЙДЕНО ЗА ЗАПИТОМ КОРИСТУВАЧА (це точні дані з транзакцій):\n  " + "\n  ".join(lines))
+            "ЗНАЙДЕНО ЗА ЗАПИТОМ КОРИСТУВАЧА (це точні дані з транзакцій):\n  " + "\n  ".join(lines) +
+            "\nРАЗОМ ПО КАТЕГОРІЯХ СЕРЕД ЗНАЙДЕНОГО (готові точні суми — бери їх, не додавай сам):\n  "
+            + "\n  ".join(tot_lines))
 
 
 def _counterparties_block(iban: str, max_lines: int = 40, owner: str = "") -> str:
@@ -267,13 +284,28 @@ def _months_block(txs: list[dict], max_months: int = 12) -> str:
         parts.append(f"{ym}: +{ai.fmt(v['inc'])}/−{ai.fmt(v['exp'])} (топ: {top_s})")
     return "  По місяцях (дохід/витрати + топ-категорії витрат): " + "; ".join(parts) + "\n"
 
+
+def _categories_block(metrics: dict) -> str:
+    """Точні суми витрат по ВСІХ категоріях (грн + частка).
+
+    Лише відсотки змушують ШІ рахувати суму з округленої частки
+    (6% × витрати) і помилятися — тому даємо готові гривні."""
+    from bot import ai_engine as ai
+    by_cat = [(c, v["expense"]) for c, v in metrics["by_cat"].items() if v["expense"] > 0]
+    if not by_cat:
+        return ""
+    by_cat.sort(key=lambda x: x[1], reverse=True)
+    total_exp = metrics["expenses"] or 1
+    items = ", ".join(f"{c} {ai.fmt(v)} грн ({v / total_exp * 100:.1f}%)" for c, v in by_cat)
+    return f"  Витрати за категоріями (точні суми): {items}\n"
+
 def get_summary_for_user(chat_id: str) -> str:
     """Текст-сводка по всем счетам пользователя. Для системного промпта ИИ-чата.
 
     Формат:
         Рахунок UA12••••2345:
           Виручка: 753 691 | Витрати: 2 366 694 | Прибуток: −1 613 003 грн
-          Топ-витрати: зарплата (30%), реклама (15%)
+          Витрати за категоріями (точні суми): зарплата 710 008 грн (30.0%), ...
           ⚠️ Аномалії: касовий розрив
     """
     chat_id = str(chat_id)
@@ -308,13 +340,7 @@ def get_summary_for_user(chat_id: str) -> str:
         line += _months_block(txs)
         # контрагенты (для вопросов про конкретных клиентов)
         line += _counterparties_block(a["iban"], owner=chat_id)
-        # топ-3 категорії витрат
-        by_cat = [(c, v["expense"]) for c, v in metrics["by_cat"].items() if v["expense"] > 0]
-        by_cat.sort(key=lambda x: x[1], reverse=True)
-        if by_cat:
-            total_exp = metrics["expenses"] or 1
-            top3 = ", ".join(f"{c} ({int(v/total_exp*100)}%)" for c, v in by_cat[:3])
-            line += f"  Топ-витрати: {top3}\n"
+        line += _categories_block(metrics)
         if anomalies["count"]:
             # краткая версия без markdown-звёздочек и заголовка
             alerts_short = anomalies["message"]
@@ -390,12 +416,7 @@ def get_summary_by_iban(iban: str) -> str:
     line += _months_block(txs)
     # контрагенты (для вопросов про конкретных клиентов)
     line += _counterparties_block(iban)
-    by_cat = [(c, v["expense"]) for c, v in metrics["by_cat"].items() if v["expense"] > 0]
-    by_cat.sort(key=lambda x: x[1], reverse=True)
-    if by_cat:
-        total_exp = metrics["expenses"] or 1
-        top3 = ", ".join(f"{c} ({int(v/total_exp*100)}%)" for c, v in by_cat[:3])
-        line += f"  Топ-витрати: {top3}\n"
+    line += _categories_block(metrics)
     if anomalies["count"]:
         alerts_short = anomalies["message"]
         for prefix in ["🚨 *Аномалія виявлена ДО того, як потрапить у звіт:*\n\n",

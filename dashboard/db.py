@@ -154,7 +154,7 @@ def search_transactions(q: str, iban: str = "", limit: int = 200, *,
             if owner:
                 sql += " AND t.owner = ?"
                 params.append(owner)
-            elif iban and iban != "all":
+            if iban and iban != "all":
                 sql += " AND t.iban = ?"
                 params.append(iban)
             sql += " ORDER BY t.date DESC LIMIT ?"
@@ -166,7 +166,7 @@ def search_transactions(q: str, iban: str = "", limit: int = 200, *,
         if owner:
             sql += " AND owner = ?"
             params.append(owner)
-        elif iban and iban != "all":
+        if iban and iban != "all":
             sql += " AND iban = ?"
             params.append(iban)
         sql += " ORDER BY date DESC LIMIT ?"

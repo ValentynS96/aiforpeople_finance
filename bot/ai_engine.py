@@ -128,10 +128,6 @@ def _api_chat_url() -> str:
     return current_provider()["base"] + "/chat/completions"
 
 
-def _api_models_url() -> str:
-    return current_provider()["base"] + "/models"
-
-
 def default_model() -> str:
     return current_provider()["default_model"]
 
@@ -509,7 +505,7 @@ def list_models(api_key: str, *, provider: str = "", timeout: int = 15) -> list[
     if not api_key:
         raise AIError("API-ключ ШІ не налаштований.")
     base = PROVIDERS.get(provider.lower(), {}).get("base") if provider else ""
-    url = (base or _api_models_url()) + "/models"
+    url = (base or current_provider()["base"]) + "/models"
     try:
         resp = requests.get(url,
                             headers={"Authorization": f"Bearer {api_key}"},
