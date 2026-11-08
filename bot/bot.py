@@ -169,7 +169,30 @@ async def cmd_summary(update: Update, _: ContextTypes.DEFAULT_TYPE):
         summary_text = (db_bridge.get_summary_for_user(update.message.chat_id)
                         or db_bridge.get_summary_for_user(""))
     # отправим как plain text (без markdown, т.к. в сводке могут быть спецсимволы)
-    await update.message.reply_text(summary_text or "Дані поки що порожні.")
+    for chunk in _split_message(summary_text or "Дані поки що порожні."):
+        await update.message.reply_text(chunk)
+
+
+TG_MAX_LEN = 4096  # ліміт Telegram на одне повідомлення
+
+
+def _split_message(text: str, limit: int = TG_MAX_LEN) -> list[str]:
+    """Ділить довгий текст на частини ≤ limit по межах рядків (Telegram ріже >4096)."""
+    chunks, cur = [], ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > limit:  # одиночний надто довгий рядок
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if len(cur) + len(line) > limit:
+            chunks.append(cur)
+            cur = ""
+        cur += line
+    if cur.strip():
+        chunks.append(cur)
+    return chunks or [text[:limit]]
 
 
 async def cmd_accounts(update: Update, _: ContextTypes.DEFAULT_TYPE):
