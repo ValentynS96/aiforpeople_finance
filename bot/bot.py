@@ -72,9 +72,9 @@ def _bind_prompt(update: Update):
         [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True)
     return update.message.reply_text(
-        "🔒 Цей бот — для клієнтів з активним доступом.\n\n"
-        "Натисни кнопку нижче або надішли свій номер телефону — прив'яжу кабінет "
-        "(доступ видає адміністратор).",
+        "👋 Привіт! Це твій особистий фінансовий асистент.\n\n"
+        "Натисни кнопку нижче або надішли свій номер телефону — створю кабінет "
+        "(без паролів і SMS).",
         reply_markup=kb)
 
 
@@ -84,12 +84,8 @@ def _bind_prompt(update: Update):
 async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE):
     grant, is_owner = _workspace(update)
     if grant:
-        lvl = db_bridge.GRANT_LEVELS.get(grant["level"], grant["level"])
-        can_upload = "✅ Так" if grant["level"] == "full" else "❌ Ні (потрібен рівень «повний»)"
         await update.message.reply_text(
-            f"👋 Кабінет: *{grant['label'] or db_bridge.mask_phone(grant['phone'])}*\n"
-            f"Права: {lvl}\n"
-            f"Завантаження виписок: {can_upload}\n\n"
+            f"👋 Кабінет: *{grant['label'] or db_bridge.mask_phone(grant['phone'])}*\n\n"
             "📎 Надішли PDF/CSV виписку — або просто запитай текстом "
             "«скільки витратив на рекламу?»\n"
             "Команди: /summary · /accounts · /reset",
@@ -103,38 +99,25 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await _bind_prompt(update)
 
 
-async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Привязка чата как чата владельца: /owner <пароль админкі>."""
-    if not context.args:
-        await update.message.reply_text("Використання: /owner <пароль адмінки>")
-        return
-    from dashboard import auth as dash_auth
-    if dash_auth.check_password(" ".join(context.args)):
-        db_bridge.add_owner_chat(update.message.chat_id)
-        await update.message.reply_text("👑 Цей чат тепер чат власника — видно всі рахунки.")
-    else:
-        await update.message.reply_text("❌ Невірний пароль.")
-
-
 async def handle_contact(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    """Клиент поделился номером (кнопка) → привязываем кабинет."""
+    """Користувач поділився номером (кнопка) → створюємо/прив'язуємо кабінет."""
     chat_id = update.message.chat_id
     raw = update.message.contact.phone_number if update.message.contact else ""
     # Telegram надсилає номер і без «+» (38067…) — нормалізуємо до +380…
     phone = db_bridge.normalize_phone(raw) or raw
-    grant = db_bridge.bind_telegram(chat_id, phone) if phone else None
-    if grant:
-        lvl = db_bridge.GRANT_LEVELS.get(grant["level"], grant["level"])
+    if not phone:
         from telegram import ReplyKeyboardRemove
         await update.message.reply_text(
-            f"✅ Кабінет прив'язаний: {grant['label'] or db_bridge.mask_phone(grant['phone'])} "
-            f"(права: {lvl}).\n\n"
-            "Тепер надсилай виписки 📎 та питай що завгодно про свої фінанси.",
+            "❌ Не вдалося розпізнати номер. Надішли його текстом: +380 67 123 45 67",
             reply_markup=ReplyKeyboardRemove(selective=False))
-    else:
-        await update.message.reply_text(
-            f"❌ Доступ для номера {db_bridge.mask_phone(phone or '?')} не знайдено "
-            "або строк минув. Зверніться до адміністратора.")
+        return
+    grant = db_bridge.ensure_grant(phone)
+    grant = db_bridge.bind_telegram(chat_id, grant["phone"]) or grant
+    from telegram import ReplyKeyboardRemove
+    await update.message.reply_text(
+        f"✅ Кабінет прив'язаний: {grant['label'] or db_bridge.mask_phone(grant['phone'])}.\n\n"
+        "Тепер надсилай виписки 📎 та питай що завгодно про свої фінанси.",
+        reply_markup=ReplyKeyboardRemove(selective=False))
 
 
 def _first_client_iban(phone: str) -> str:
@@ -342,7 +325,7 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
         # 7. Ответ
         summary = ai.build_summary(metrics, anomalies)
         summary += f"\n\n🏦 Рахунок: `{info['iban_mask']}`"
-        summary += f"\n📊 Дашборд: {ai.DASHBOARD_URL}"
+        summary += f"\n📊 Дашборд: {ai.dashboard_url()}"
         if not db_saved:
             summary += "\n\n⚠️ Не вдалося зберегти (див. логи)."
         if sheets_ok:
@@ -388,19 +371,14 @@ async def handle_chat(update: Update, _: ContextTypes.DEFAULT_TYPE):
     if not grant and not is_owner:
         norm = db_bridge.normalize_phone(user_msg)
         if norm:
-            g = db_bridge.bind_telegram(chat_id, norm)
-            if g:
-                lvl = db_bridge.GRANT_LEVELS.get(g["level"], g["level"])
-                from telegram import ReplyKeyboardRemove
-                await update.message.reply_text(
-                    f"✅ Кабінет прив'язаний: {g['label'] or db_bridge.mask_phone(g['phone'])} "
-                    f"(права: {lvl}).\n\n"
-                    "Тепер надсилай виписки 📎 та питай що завгодно про свої фінанси.",
-                    reply_markup=ReplyKeyboardRemove(selective=False))
-            else:
-                await update.message.reply_text(
-                    f"❌ Доступ для номера {db_bridge.mask_phone(norm)} не знайдено "
-                    "або строк минув. Зверніться до адміністратора.")
+            # локальна редакція: кабінет створюється автоматично
+            g = db_bridge.ensure_grant(norm)
+            g = db_bridge.bind_telegram(chat_id, g["phone"]) or g
+            from telegram import ReplyKeyboardRemove
+            await update.message.reply_text(
+                f"✅ Кабінет прив'язаний: {g['label'] or db_bridge.mask_phone(g['phone'])}.\n\n"
+                "Тепер надсилай виписки 📎 та питай що завгодно про свої фінанси.",
+                reply_markup=ReplyKeyboardRemove(selective=False))
         else:
             await _bind_prompt(update)
         return
@@ -514,7 +492,6 @@ def build_application() -> Application | None:
     app = Application.builder().token(token).build()
     # команды
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("owner", cmd_owner))
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("accounts", cmd_accounts))
     app.add_handler(CommandHandler("reset", cmd_reset))

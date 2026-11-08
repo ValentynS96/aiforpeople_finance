@@ -1,15 +1,14 @@
 """
-Авторизация админки: пароль задаётся через setup-мастер (хранится хэшем
-в БД) или через ADMIN_PASSWORD в .env (для продвинутых, приоритет env).
-Signed-cookie сессия.
+Сесії без паролів (локальна редакція): «адмінки» з паролем більше немає —
+стартова сторінка /admin («Налаштування») відкрита, доступ до неї = доступ
+до комп'ютера. Тут лишаються лише підписані cookie-сесії:
 
-Безопасность:
-- Пароль сравнивается через hmac.compare_digest (timing-safe).
-- Хэш пароля в БД: PBKDF2-HMAC-SHA256, случайная соль.
-- Cookie подписан HMAC-SHA256, содержит expiry + session-id (реверсивный).
-- secret_key: env SECRET_KEY || автогенерация в data/secret.key (см. crypto).
-- samesite=strict. Secure-флаг включается автоматически для https-запросов
-  (для localhost/http остаётся без Secure, иначе браузер не примет cookie).
+- IBAN-сесія (поточний рахунок дашборда);
+- телефонна сесія (вхід за номером, доступ створюється автоматично).
+
+Безпека cookie:
+- Cookie підписаний HMAC-SHA256, містить expiry.
+- secret_key: env SECRET_KEY || автогенерация в data/session.key.
 """
 
 import hashlib
@@ -21,11 +20,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import RedirectResponse
 
 _log = logging.getLogger("auth")
 
-COOKIE_NAME = "admin_session"
 SESSION_DAYS = 7
 
 # Файл секрета подписи cookie (рядом с БД): сессии ВЫЖИВАЮТ рестарты контейнера.
@@ -55,41 +52,16 @@ def _signing_secret() -> bytes:
         return secrets.token_hex(32).encode("utf-8")
 
 
-def admin_password() -> str:
-    """Пароль админки из env (если задан — приоритет). Пусто, если нет."""
-    return os.getenv("ADMIN_PASSWORD") or ""
-
-
-def set_admin_password(password: str):
-    """Сохраняет пароль админки в БД как PBKDF2-хэш с солью."""
-    from dashboard import db as _db
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt.encode("ascii"), 100_000
-    ).hex()
-    _db.set_setting("admin_password_hash", {"salt": salt, "hash": digest})
-
-
-def _check_db_password(password: str) -> bool:
-    """Сверяет пароль с хэшем из БД (timing-safe)."""
-    from dashboard import db as _db
-    record = _db.get_setting("admin_password_hash")
-    if not record or not isinstance(record, dict):
-        return False
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"),
-        record["salt"].encode("ascii"), 100_000
-    ).hex()
-    return hmac.compare_digest(digest, record["hash"])
-
-
 def is_setup_needed() -> bool:
-    """True если первичная настройка не пройдена: пароля нет ни в env, ни в БД."""
+    """True, якщо ще не налаштовано жодного ключа ШІ (Google чи DeepSeek).
+
+    Локальна редакція: майстер першого запуску запитує вибір провайдера й
+    API-ключ — це єдине обов'язкове налаштування.
+    """
     from dashboard import db as _db
-    if admin_password():
+    if _db.secret_is_set("deepseek_key"):
         return False
-    record = _db.get_setting("admin_password_hash")
-    return not (record and isinstance(record, dict) and record.get("hash"))
+    return not os.getenv("DEEPSEEK_API_KEY")
 
 
 def _make_token(expires_at: str, session_id: str) -> str:
@@ -102,100 +74,6 @@ def _make_token(expires_at: str, session_id: str) -> str:
     payload = f"{expires_at}|{session_id}"
     sig = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}|{sig}"
-
-
-def _verify_token(token: str) -> bool:
-    """Проверяет подпись и срок действия токена."""
-    if not token or token.count("|") != 2:
-        return False
-    expires_at, session_id, sig = token.split("|")
-    expected = _make_token(expires_at, session_id)
-    if not hmac.compare_digest(token, expected):
-        return False
-    try:
-        exp = datetime.fromisoformat(expires_at)
-        return datetime.now(timezone.utc) < exp
-    except ValueError:
-        return False
-
-
-def check_password(password: str) -> bool:
-    """Проверяет пароль: env ADMIN_PASSWORD (приоритет) → хэш из БД.
-    Timing-safe. True если пароль верный."""
-    if not password:
-        return False
-    env_pw = admin_password()
-    if env_pw:
-        pw_bytes = password.encode("utf-8", errors="surrogatepass")
-        expected_bytes = env_pw.encode("utf-8", errors="surrogatepass")
-        return hmac.compare_digest(pw_bytes, expected_bytes)
-    return _check_db_password(password)
-
-
-# --- Код підтвердження видачі доступів (другий фактор для /admin/grants) ---
-GRANT_CODE_KEY = "grant_code_hash"
-
-
-def set_grant_code(code: str):
-    """Сохраняет код выдачи доступов как PBKDF2-хэш (как пароль админки)."""
-    from dashboard import db as _db
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", code.encode("utf-8"), salt.encode("ascii"), 100_000
-    ).hex()
-    _db.set_setting(GRANT_CODE_KEY, {"salt": salt, "hash": digest})
-
-
-def grant_code_is_set() -> bool:
-    from dashboard import db as _db
-    rec = _db.get_setting(GRANT_CODE_KEY)
-    return bool(rec and isinstance(rec, dict) and rec.get("hash"))
-
-
-def check_grant_code(code: str) -> bool:
-    """Timing-safe проверка кода выдачи доступов."""
-    from dashboard import db as _db
-    rec = _db.get_setting(GRANT_CODE_KEY)
-    if not rec or not isinstance(rec, dict):
-        # код не заданий — видача заборонена (безпечний дефолт)
-        return False
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", (code or "").encode("utf-8"),
-        rec["salt"].encode("ascii"), 100_000
-    ).hex()
-    return hmac.compare_digest(digest, rec["hash"])
-
-
-def login(response, password: str) -> bool:
-    """Проверяет пароль и ставит cookie. True если пароль верный."""
-    if not check_password(password):
-        return False
-    expires = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
-    session_id = secrets.token_hex(16)
-    token = _make_token(expires, session_id)
-    response.set_cookie(
-        COOKIE_NAME, token,
-        max_age=SESSION_DAYS * 86400,
-        httponly=True,
-        samesite="strict",
-    )
-    return True
-
-
-def logout(response):
-    response.delete_cookie(COOKIE_NAME)
-
-
-def is_authed(request: Request) -> bool:
-    token = request.cookies.get(COOKIE_NAME)
-    return _verify_token(token) if token else False
-
-
-def require_auth(request: Request):
-    """Возвращает RedirectResponse на /admin/login если не авторизован, иначе None."""
-    if not is_authed(request):
-        return RedirectResponse("/admin/login", status_code=303)
-    return None
 
 
 # ============================================================
@@ -241,7 +119,7 @@ def get_iban_session(request: Request) -> str:
 
 
 # ============================================================
-# Телефонная сессия (вход по номеру — доступ выдаёт админ)
+# Телефонная сессия (вход за номером — кабінет створюється автоматично)
 # ============================================================
 PHONE_COOKIE = "phone_session"
 

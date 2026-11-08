@@ -508,6 +508,27 @@ def bind_telegram(chat_id, phone: str) -> dict | None:
     return db.bind_telegram(chat_id, phone)
 
 
+def ensure_grant(phone: str, label: str = "") -> dict | None:
+    """Локальна редакція: кабінет за номером створюється автоматично.
+
+    Якщо активного доступу для номера немає — створюємо повний (чат +
+    завантаження, всі рахунки, без строку). Викликається і з веб-логіна,
+    і з Telegram-прив'язки.
+    """
+    norm = db.normalize_phone(phone)
+    if not norm:
+        return None
+    grant = db.find_active_grant(norm)
+    if grant:
+        return grant
+    if not label:
+        # ім'я з майстра налаштування (якщо заповнював) — інакше покажемо номер
+        label = (db.get_setting("owner_name") or "").strip()
+    db.create_grant(norm, label[:60], "full", "all", None,
+                    multi_account=True)
+    return db.find_active_grant(norm)
+
+
 def is_owner_chat(chat_id) -> bool:
     """Чат владельца (привязан командой /owner с паролем админки)."""
     return str(chat_id) in db.owner_telegram_chats()

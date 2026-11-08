@@ -9,10 +9,7 @@ FastAPI-маршруты дашборда и админки.
   GET  /api/transactions    → таблица транзакций (с фильтрами + пагинация)
   GET  /api/categories      → список категорий (для фильтра)
 
-  GET  /admin               → админка (4 раздела, за паролем)
-  GET  /admin/login         → форма входа
-  POST /admin/login         → проверка пароля
-  GET  /admin/logout        → выход
+  GET  /admin               → сторінка налаштувань (без пароля — локальна редакція)
   POST /admin/thresholds    → сохранить пороги алертов
   POST /admin/categories    → сохранить категории
   POST /admin/secrets       → сохранить ключи (шифруются)
@@ -135,8 +132,6 @@ async def dashboard_page(request: Request):
         return RedirectResponse("/setup", status_code=303)
     iban = auth.get_iban_session(request)
     grant = _phone_user(request)
-    if not iban and auth.is_authed(request):
-        iban = "all"          # адмін без IBAN-сесії бачить усі рахунки
     if not iban and not grant:
         return templates.TemplateResponse(request, "welcome.html", {
             "iban_login_allowed": bool(db.get_setting("allow_iban_login", False)),
@@ -161,10 +156,10 @@ async def dashboard_page(request: Request):
 async def login_iban(request: Request, iban: str = Form(...)):
     """Устанавливает IBAN-сессию и редиректит в дашборд.
 
-    По умолчанию ВЫКЛЮЧЕН (данные клиентов нельзя открывать по чужому IBAN).
-    Включается в админке; админ может входить всегда."""
+    По умолчанию ВЫКЛЮЧЕН (данные нельзя открывать по чужому IBAN).
+    Включается в налаштуваннях."""
     from bot.iban import normalize, is_valid
-    if not auth.is_authed(request) and not db.get_setting("allow_iban_login", False):
+    if not db.get_setting("allow_iban_login", False):
         return templates.TemplateResponse(request, "welcome.html", {
             "error": "Вхід за IBAN вимкнено. Увійдіть за номером телефону.",
         }, status_code=403)
@@ -183,7 +178,6 @@ async def logout_iban():
     resp = RedirectResponse("/", status_code=303)
     auth.clear_iban_session(resp)
     auth.clear_phone_session(resp)
-    auth.logout(resp)   # повний вихід: і з адмінської сесії також
     return resp
 
 
@@ -233,15 +227,23 @@ def _data_scope(request: Request) -> tuple[str, str]:
 
 @router.post("/login-phone")
 async def login_phone(request: Request, phone: str = Form(...)):
-    """Вход по номеру телефона: доступ должен быть выдан админом и не истечь."""
+    """Вхід за номером телефону. Локальна редакція: кабінет створюється
+    автоматично при першому вході (повний доступ, усі рахунки, без строку)."""
     norm = db.normalize_phone(phone)
-    grant = db.find_active_grant(norm) if norm else None
-    if not grant:
-        # единое сообщение — не раскрываем, есть ли номер в системе
+    if not norm:
         return templates.TemplateResponse(request, "welcome.html", {
-            "phone_error": "Доступ для цього номера не знайдено або строк минув. "
-                           "Зверніться до адміністратора.",
+            "phone_error": "Не вдалося розпізнати номер. Перевірте формат: "
+                           "+380 67 123 45 67.",
         }, status_code=401)
+
+    from bot import db_bridge
+    label = (db.get_setting("owner_name") or "").strip()
+    grant = db_bridge.ensure_grant(norm, label)
+    if not grant:  # малоймовірно (нормалізація вже пройшла)
+        return templates.TemplateResponse(request, "welcome.html", {
+            "phone_error": "Не вдалося створити кабінет для цього номера. "
+                           "Спробуйте ще раз.",
+        }, status_code=500)
 
     resp = RedirectResponse("/", status_code=303)
     auth.set_phone_session(resp, grant["phone"], grant["level"], "all")
@@ -346,7 +348,7 @@ async def api_chat(request: Request):
     # доступ по телефону: чат вимагає рівень «перегляд + чат» або вище
     pu = _phone_user(request)
     if auth.get_phone_session(request) and not pu:
-        return JSONResponse({"error": "Доступ припинено. Зверніться до адміністратора."}, status_code=401)
+        return JSONResponse({"error": "Доступ припинено. Увійдіть знову за номером телефону."}, status_code=401)
     if pu and pu["level"] not in ("chat", "full"):
         return JSONResponse({"error": "Чат із ШІ у вашому доступі вимкнено (лише перегляд)."}, status_code=403)
 
@@ -371,7 +373,7 @@ async def api_chat(request: Request):
 
     api_key = db_bridge.get_deepseek_key()
     if not api_key:
-        return JSONResponse({"error": "AI не налаштований (DeepSeek ключ). Зверніться до адміністратора."}, status_code=503)
+        return JSONResponse({"error": "AI не налаштований — додайте ключ у налаштуваннях (кнопка ⚙️)."}, status_code=503)
 
     # сохраняем вопрос + история конкретной беседы
     db.add_chat_message(key, "user", message, session_id=session_id)
@@ -450,7 +452,7 @@ async def api_upload(request: Request):
     # доступ по телефону: полный уровень — обязателен для загрузок
     pu = _phone_user(request)
     if auth.get_phone_session(request) and not pu:
-        return JSONResponse({"error": "Доступ припинено. Зверніться до адміністратора."}, status_code=401)
+        return JSONResponse({"error": "Доступ припинено. Увійдіть знову за номером телефону."}, status_code=401)
     if pu and pu["level"] != "full":
         return JSONResponse({"error": "Завантаження виписок доступне лише з повним доступом."}, status_code=403)
 
@@ -521,7 +523,7 @@ async def api_upload(request: Request):
 
         api_key = db_bridge.get_deepseek_key()
         if not api_key:
-            yield send("error", {"error": "AI не налаштований (DeepSeek ключ). Зверніться до адміністратора."})
+            yield send("error", {"error": "AI не налаштований — додайте ключ у налаштуваннях (кнопка ⚙️)."})
             return
 
         try:
@@ -609,18 +611,16 @@ async def api_first_upload(request: Request):
     # доступ по телефону: полный уровень — обязателен для загрузок
     pu = _phone_user(request)
     if auth.get_phone_session(request) and not pu:
-        return JSONResponse({"error": "Доступ припинено. Зверніться до адміністратора."}, status_code=401)
+        return JSONResponse({"error": "Доступ припинено. Увійдіть знову за номером телефону."}, status_code=401)
     if pu and pu["level"] != "full":
         return JSONResponse({"error": "Завантаження виписок доступне лише з повним доступом."}, status_code=403)
-    # анонимам загрузка запрещена: сначала войдите по телефону (или админ)
-    if not pu and not auth.is_authed(request) and not auth.get_iban_session(request):
+    # анонімам загрузка запрещена: сначала войдите по телефону
+    if not pu and not auth.get_iban_session(request):
         return JSONResponse({"error": "Спочатку увійдіть за номером телефону."}, status_code=401)
 
-    # кабинет: клиент → телефон, админ → 'admin'
-    ws_id = (pu["phone"] if pu
-             else ("admin" if auth.is_authed(request) else auth.get_iban_session(request)))
-    ws_label = ((pu["label"] or db.mask_phone(pu["phone"])) if pu
-                else ("адмін" if ws_id == "admin" else "web"))
+    # кабинет: клиент → телефон, IBAN-сесія → 'web'
+    ws_id = pu["phone"] if pu else "web"
+    ws_label = (pu["label"] or db.mask_phone(pu["phone"])) if pu else "web"
 
     import uuid as _uuid
 
@@ -686,7 +686,7 @@ async def _process_first_upload(job_id: str, content: bytes, filename: str,
 
         api_key = db_bridge.get_deepseek_key()
         if not api_key:
-            update(status="error", error="AI не налаштований (DeepSeek ключ). Зверніться до адміністратора.")
+            update(status="error", error="AI не налаштований — додайте ключ у налаштуваннях (кнопка ⚙️).")
             return
         categories = db_bridge.get_categories()
         model = db_bridge.get_deepseek_model()
@@ -758,9 +758,6 @@ async def api_job_status(job_id: str):
 @router.post("/admin/send-report")
 async def admin_send_report(request: Request):
     """Ручной запуск ежемесячного P&L-отчёта (для демо). Требует админ-сессию."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     from server import runtime
     if not runtime.bot_app:
         return JSONResponse({"ok": False, "error": "Telegram-бот не запущено (немає токена)"}, status_code=400)
@@ -770,24 +767,20 @@ async def admin_send_report(request: Request):
 
 
 # ============================================================
-# Удаление данных по IBAN (подтверждение паролем админа)
+# Удаление данных по IBAN (подтверждение — модальное окно налаштувань)
 # ============================================================
 @router.post("/api/delete-data")
 async def api_delete_data(request: Request):
-    """Удаляет все данные указанного IBAN. Требует админ-сессию + пароль.
+    """Видаляє всі дані вказаного IBAN.
 
-    Тело: {"password": "...", "iban": "UA..."}.
-    Доступ: только из админки (auth.require_auth).
+    Локальна редакція: без паролів — підтвердження робиться модальним вікном
+    на сторінці налаштувань. Тіло: {"iban": "UA..."}.
     """
     import json as _json
-    redir = auth.require_auth(request)
-    if redir:
-        return JSONResponse({"error": "Потрібна авторизація адміністратора"}, status_code=401)
 
     body = await request.body()
     try:
         data = _json.loads(body)
-        password = data.get("password", "")
         iban = (data.get("iban") or "").strip()
     except (ValueError, KeyError):
         return JSONResponse({"error": "Невірний запит"}, status_code=400)
@@ -795,12 +788,9 @@ async def api_delete_data(request: Request):
     if not iban:
         return JSONResponse({"error": "Не вказано IBAN"}, status_code=400)
 
-    if not auth.check_password(password):
-        return JSONResponse({"error": "Невірний пароль"}, status_code=403)
-
     deleted = db.delete_iban_data(iban)
     _log.warning("Видалено дані IBAN=%s: %s", iban, deleted)
-    db.log_usage("адмін", "видалено дані рахунку", source="admin",
+    db.log_usage("налаштування", "видалено дані рахунку", source="admin",
                  details=f"{iban}: {deleted}")
     return {"ok": True, "deleted": deleted}
 
@@ -810,10 +800,7 @@ async def api_delete_data(request: Request):
 # ============================================================
 @router.get("/api/deepseek/models")
 async def api_deepseek_models(request: Request):
-    """Возвращает актуальный список моделей с DeepSeek + текущую выбранную."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
+    """Возвращает актуальный список моделей активного провайдера + текущую."""
     from bot import ai_engine as ai, db_bridge
     api_key = db_bridge.get_deepseek_key()
     if not api_key:
@@ -830,19 +817,21 @@ async def api_deepseek_models(request: Request):
 
 @router.post("/api/deepseek/test-key")
 async def api_deepseek_test_key(request: Request):
-    """Проверка DeepSeek ключа. Если в теле передан key — проверяем ЕГО
-    (введённый в форму, до сохранения); иначе — сохранённый в БД."""
-    redir = auth.require_auth(request)
-    if redir:
-        return JSONResponse({"ok": False, "error": "Потрібна авторизація"}, status_code=401)
+    """Перевірка API-ключа (Google чи DeepSeek) живим запитом до /models.
+
+    Тіло: {"key": "...", "provider": "google|deepseek"}. Якщо ключ не передано —
+    перевіряємо збережений у БД. Використовується майстром налаштування
+    (до збереження) і сторінкою налаштувань."""
     import json as _json
     from bot import ai_engine as ai, db_bridge
 
     body = await request.body()
     key = ""
+    provider = ""
     try:
         data = _json.loads(body)
         key = (data.get("key") or "").strip()
+        provider = (data.get("provider") or "").strip().lower()
     except (ValueError, AttributeError):
         pass
     if not key:
@@ -853,7 +842,7 @@ async def api_deepseek_test_key(request: Request):
         return JSONResponse({"ok": False,
                              "error": "Ключ містить пробіл — здається, при копіюванні прилип зайвий текст"})
     try:
-        models = await asyncio.to_thread(ai.list_models, key)
+        models = await asyncio.to_thread(ai.list_models, key, provider=provider)
         return {"ok": True, "models": len(models), "current": db_bridge.get_deepseek_model()}
     except ai.AIError as e:
         return JSONResponse({"ok": False, "error": _human_ai_error(str(e))})
@@ -862,9 +851,6 @@ async def api_deepseek_test_key(request: Request):
 @router.post("/admin/model")
 async def admin_save_model(request: Request, model: str = Form(...)):
     """Сохраняет выбранную модель DeepSeek."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     from bot import db_bridge
     db_bridge.set_deepseek_model(model.strip())
     db.log_usage("адмін", "змінено модель AI", source="admin",
@@ -873,57 +859,11 @@ async def admin_save_model(request: Request, model: str = Form(...)):
 
 
 # ============================================================
-# Доступы по телефону (выдача/отзыв/продление)
+# Користувачі (кабінети створюються автоматично при першому вході)
 # ============================================================
-@router.post("/admin/grants")
-async def admin_create_grant(request: Request, phone: str = Form(...),
-                             label: str = Form(""), level: str = Form("view"),
-                             days: str = Form("30"),
-                             multi_account: bool = Form(False),
-                             code: str = Form("")):
-    """Выдаёт доступ-кабинет по номеру телефона. Повторная выдача = обновление.
-
-    Требует второй фактор — код подтверждения выдачи (даже при админ-сессии)."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
-
-    # код видачі — обов'язковий другий фактор
-    if not auth.grant_code_is_set():
-        db.log_usage("адмін", "попытка выдачи без заданного кода", source="admin",
-                     ok=False, details=f"{db.mask_phone(db.normalize_phone(phone) or phone[:15])}")
-        return _admin_back(False, "Помилка: код видачі не налаштований. Зверніться до власника системи.")
-    if not auth.check_grant_code(code):
-        db.log_usage("адмін", "НЕВІРНИЙ КОД ВИДАЧІ", source="admin", ok=False,
-                     details=f"номер: {db.mask_phone(db.normalize_phone(phone) or phone[:15])}")
-        return _admin_back(False, "Помилка: невірний код підтвердження видачі (спробу зафіксовано)")
-
-    norm = db.normalize_phone(phone)
-    if not norm:
-        db.log_usage("адмін", "помилка видачі доступу", source="admin", ok=False,
-                     details=f"некоректний номер: {phone[:30]}")
-        return _admin_back(False, f"Помилка: некоректний номер «{phone[:30]}»")
-    if level not in db.GRANT_LEVELS:
-        level = "view"
-    days_n = None if days in ("", "0", "none") else max(1, min(365, int(days)))
-    back = "/access" if getattr(admin_create_grant, "_back_access", False) else "/admin"
-
-    db.create_grant(norm, label.strip()[:60], level, "all", days_n,
-                    multi_account=multi_account)
-    db.log_usage("адмін", "видано доступ", source="admin",
-                 details=f"{label.strip() or db.mask_phone(norm)} · {db.mask_phone(norm)} · "
-                         f"{db.GRANT_LEVELS[level]} · "
-                         f"{'без строку' if days_n is None else str(days_n) + ' дн.'} · "
-                         f"{'мультирахунок' if multi_account else 'один рахунок'}")
-    return _admin_back(True, f"Доступ видано: {label.strip() or db.mask_phone(norm)} "
-                             f"({db.GRANT_LEVELS[level]}, "
-                             f"{'без строку' if days_n is None else str(days_n) + ' дн.'}, "
-                             f"{'🏦 всі рахунки' if multi_account else '🏦 один рахунок'})")
-
-
 def _admin_back(ok: bool, msg: str, anchor: str = "access",
                 page: str = "/admin") -> RedirectResponse:
-    """Редирект назад (админка или /access) с уведомлением о результате."""
+    """Редирект назад у налаштування з уведомленням про результат."""
     from urllib.parse import quote
     url = f"{page}?ok={1 if ok else 0}&msg={quote(msg)}"
     if page == "/admin":
@@ -934,92 +874,36 @@ def _admin_back(ok: bool, msg: str, anchor: str = "access",
 @router.post("/admin/provider")
 async def admin_set_provider(request: Request, provider: str = Form(...)):
     """Перемикає провайдера ШІ (google = Gemini API / deepseek)."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     from bot import db_bridge
     from bot.ai_engine import PROVIDERS
     provider = provider.lower()
     if provider not in PROVIDERS:
         return _admin_back(False, f"Помилка: невідомий провайдер «{provider[:20]}»", anchor="secrets")
     db_bridge.set_ai_provider(provider)
-    db.log_usage("адмін", "змінено провайдера ШІ", source="admin",
+    db.log_usage("налаштування", "змінено провайдера ШІ", source="admin",
                  details=f"{provider} · модель за замовчуванням: {PROVIDERS[provider]['default_model']}")
     return _admin_back(True, f"Провайдера змінено: {provider}. "
                              f"Модель: {PROVIDERS[provider]['default_model']}. "
                              f"Не забудьте ключ відповідного провайдера нижче.", anchor="secrets")
 
 
-@router.post("/admin/grants/{gid}/level")
-async def admin_grant_level(request: Request, gid: int, level: str = Form(...)):
-    """Зміна рівня прав уже виданого доступу."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
-    if level not in db.GRANT_LEVELS:
-        db.log_usage("адмін", "помилка зміни рівня", source="admin",
-                     details=f"grant #{gid}: невідомий рівень «{level[:20]}»")
-        return _admin_back(False, f"Помилка: невідомий рівень «{level}»")
-    ok = db.set_grant_level(gid, level)
-    db.log_usage("адмін", "змінено рівень доступу" if ok else "помилка зміни рівня",
-                 source="admin",
-                 details=f"grant #{gid} → {db.GRANT_LEVELS[level]}")
-    if ok:
-        return _admin_back(True, f"Права доступу #{gid} змінено: {db.GRANT_LEVELS[level]}")
-    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
-
-
-@router.post("/admin/grants/{gid}/multi")
-async def admin_grant_multi(request: Request, gid: int, on: bool = Form(False)):
-    """Вмикає/вимикає мультирахунок (спільний дашборд по всіх рахунках)."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
-    ok = db.set_grant_multi(gid, on)
-    db.log_usage("адмін", "мультирахунок " + ("увімкнено" if on else "вимкнено")
-                 if ok else "помилка перемикання мультирахунку",
-                 source="admin", details=f"grant #{gid}")
-    if ok:
-        return _admin_back(True, f"Мультирахунок для доступу #{gid} "
-                                 f"{'увімкнено' if on else 'вимкнено'}")
-    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
-
-
 @router.post("/admin/grants/{gid}/revoke")
 async def admin_revoke_grant(request: Request, gid: int):
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
+    """Видаляє користувача (відкликає його кабінет). Наступний вхід за тим
+    номером створить новий кабінет — це «скидання» користувача."""
     ok = db.revoke_grant(gid)
-    db.log_usage("адмін", "доступ відкликано" if ok else "помилка відкликання",
+    db.log_usage("налаштування", "користувача видалено" if ok else "помилка видалення",
                  source="admin", details=f"grant #{gid}")
     if ok:
-        return _admin_back(True, f"Доступ #{gid} відкликано")
-    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
-
-
-@router.post("/admin/grants/{gid}/extend")
-async def admin_extend_grant(request: Request, gid: int, days: int = 30):
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
-    days = max(1, min(365, days))
-    ok = db.extend_grant(gid, days)
-    db.log_usage("адмін", "доступ продовжено" if ok else "помилка продовження",
-                 source="admin", details=f"grant #{gid} +{days} дн.")
-    if ok:
-        return _admin_back(True, f"Доступ #{gid} продовжено на {days} дн.")
-    return _admin_back(False, f"Помилка: доступ #{gid} не знайдено")
+        return _admin_back(True, f"Користувача #{gid} видалено")
+    return _admin_back(False, f"Помилка: користувача #{gid} не знайдено")
 
 
 @router.post("/admin/iban-login-toggle")
 async def admin_iban_login_toggle(request: Request, enabled: bool = Form(False)):
     """Переключає вхід за IBAN без доступу (за замовчуванням вимкнений)."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     db.set_setting("allow_iban_login", bool(enabled))
-    db.log_usage("адмін", "перемикач входу за IBAN", source="admin",
+    db.log_usage("налаштування", "перемикач входу за IBAN", source="admin",
                  details="увімкнено" if enabled else "вимкнено")
     return _admin_back(enabled, "Вхід за IBAN увімкнено" if enabled else "Вхід за IBAN вимкнено")
 
@@ -1145,8 +1029,7 @@ async def api_attach_iban(request: Request, iban: str):
     """Ставит IBAN-сессию по параметру (после первой загрузки виписки).
     Вызывается JS-ом после успешного /api/first-upload."""
     from bot.iban import normalize, is_valid
-    if (not auth.is_authed(request) and not _phone_user(request)
-            and not db.get_setting("allow_iban_login", False)):
+    if not _phone_user(request) and not db.get_setting("allow_iban_login", False):
         return JSONResponse({"ok": False, "error": "Вхід за IBAN вимкнено"}, status_code=403)
     norm = normalize(iban)
     if not is_valid(norm):
@@ -1157,125 +1040,80 @@ async def api_attach_iban(request: Request, iban: str):
 
 
 # ============================================================
-# Первичная настройка (setup-мастер: пароль + ключи через UI)
+# Первинна настройка (майстер: вибір провайдера ШІ + ключ, без паролів)
 # ============================================================
 @router.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
-    """Мастер первого запуска. Если уже настроено — редирект в админку."""
+    """Майстер першого запуску. Якщо ключ уже налаштовано — на головну."""
     if not auth.is_setup_needed():
-        return RedirectResponse("/admin", status_code=303)
+        return RedirectResponse("/", status_code=303)
     return templates.TemplateResponse(request, "setup.html", {"error": ""})
 
 
 @router.post("/setup")
 async def setup_submit(request: Request,
-                       password: str = Form(...),
-                       password2: str = Form(...),
-                       deepseek_key: str = Form(""),
+                       provider: str = Form("google"),
+                       api_key: str = Form(""),
+                       name: str = Form(""),
                        telegram_token: str = Form("")):
-    """Сохраняет пароль (хэш в БД) + ключи (Fernet). Рестартит бота с токеном."""
+    """Зберігає вибір провайдера ШІ + API-ключ (Fernet у БД).
+
+    Паролів у системі немає: кабінет користувача створюється автоматично
+    при першому вході за номером телефону. Telegram-токен — опційний."""
+    from bot import db_bridge
+    from bot.ai_engine import PROVIDERS
+
     if not auth.is_setup_needed():
-        return RedirectResponse("/admin", status_code=303)
+        return RedirectResponse("/", status_code=303)
 
-    if password != password2:
+    provider = provider.strip().lower()
+    if provider not in PROVIDERS:
+        provider = "google"
+    key = api_key.strip()
+    if not key:
         return templates.TemplateResponse(request, "setup.html", {
-            "error": "Паролі не співпадають",
+            "error": "Введіть API-ключ — без нього ШІ не зможе аналізувати виписки.",
         }, status_code=400)
-    if len(password) < 4:
+    if " " in key:
         return templates.TemplateResponse(request, "setup.html", {
-            "error": "Пароль має бути мінімум 4 символи",
+            "error": "Ключ містить пробіл — здається, при копіюванні до нього прилип "
+                     "зайвий текст. Вставте чистий ключ.",
         }, status_code=400)
-
-    auth.set_admin_password(password)
-    ds = deepseek_key.strip()
-    if ds:
-        # формат настоящего ключа DeepSeek: sk- + 32 hex-символа (35 всего)
+    if provider == "deepseek":
         import re as _re
-        if not _re.fullmatch(r"sk-[0-9a-f]{32}", ds):
+        if not _re.fullmatch(r"sk-[0-9a-f]{32}", key):
             return templates.TemplateResponse(request, "setup.html", {
-                "error": "DeepSeek ключ виглядає невірно. Справжній ключ: «sk-» + 32 символи "
+                "error": "DeepSeek-ключ виглядає невірно. Справжній ключ: «sk-» + 32 символи "
                          "(приклад: sk-0be3f1a2c3d4e5f67890abcdef1234567). "
                          "Скопіюйте його повністю з platform.deepseek.com → API Keys.",
             }, status_code=400)
-        db.set_secret("deepseek_key", ds)
+    elif len(key) < 25:
+        return templates.TemplateResponse(request, "setup.html", {
+            "error": "Google-ключ виглядає занадто коротким. Скопіюйте ключ повністю "
+                     "з aistudio.google.com → Get API key.",
+        }, status_code=400)
 
-    # бот стартует сразу, если токен ввели (иначе — позже через админку)
+    db.set_secret("deepseek_key", key)   # універсальний слот ключа ШІ
+    db_bridge.set_ai_provider(provider)
+    if name.strip():
+        db.set_setting("owner_name", name.strip()[:60])
+
+    # бот стартує одразу, якщо токен ввели (інакше — пізніше в налаштуваннях)
     if telegram_token.strip():
         db.set_secret("telegram_token", telegram_token.strip())
         from server import runtime
         await runtime.restart_bot()
 
-    _log.info("✅ Первинне налаштування завершено")
+    _log.info("✅ Первинне налаштування завершено: провайдер %s", provider)
+    db.log_usage("налаштування", "перший запуск: провайдер ШІ", source="admin",
+                 details=f"{provider}")
 
-    # сразу логиним и ведём на стартовую страницу (загрузка первой виписки)
-    resp = RedirectResponse("/", status_code=303)
-    auth.login(resp, password)
-    return resp
-
-
-# ============================================================
-# Админка
-# ============================================================
-@router.get("/admin/login", response_class=HTMLResponse)
-async def admin_login_page(request: Request):
-    if auth.is_setup_needed():
-        return RedirectResponse("/setup", status_code=303)
-    return templates.TemplateResponse(request, "admin_login.html", {"error": ""})
-
-
-@router.post("/admin/login")
-async def admin_login_submit(request: Request, password: str = Form(...),
-                             next: str = Form("/admin")):
-    # захист від відкритих редиректів — тільки внутрішні шляхи
-    nxt = next if next.startswith("/") and not next.startswith("//") else "/admin"
-    resp = RedirectResponse(nxt, status_code=303)
-    ok = auth.login(resp, password)
-    db.log_usage("адмін", "вхід в адмінку", source="admin", ok=ok,
-                 details="пароль прийнято" if ok else "невірний пароль")
-    if ok:
-        return resp
-    return templates.TemplateResponse(request, "admin_login.html", {
-        "error": "Невірний пароль",
-    }, status_code=401)
-
-
-# ============================================================
-# Швидка сторінка «Доступи» — тільки видача, без важкої адмінки
-# ============================================================
-@router.get("/access", response_class=HTMLResponse)
-async def access_page(request: Request):
-    """Легкий інструмент видачі доступів (для власника після вебінару)."""
-    if not auth.is_authed(request):
-        return templates.TemplateResponse(request, "access.html", {
-            "need_login": True, "grants": [], "notice": "", "notice_ok": True,
-            "grant_levels": db.GRANT_LEVELS, "counts": {},
-        })
-    grants = db.list_grants()
-    active = [g for g in grants if g["status"] == "active"]
-    return templates.TemplateResponse(request, "access.html", {
-        "need_login": False,
-        "grants": grants[:15],
-        "grant_levels": db.GRANT_LEVELS,
-        "notice": request.query_params.get("msg", ""),
-        "notice_ok": request.query_params.get("ok", "1") == "1",
-        "counts": {
-            "active": len(active),
-            "tg": sum(1 for g in grants if g["telegram_chat_id"]),
-            "total": len(grants),
-        },
-    })
-
-
-@router.get("/admin/logout")
-async def admin_logout():
-    # вихід → на головну сторінку системи (передбачувано для користувача)
-    resp = RedirectResponse("/", status_code=303)
-    auth.logout(resp)
-    return resp
+    # ведемо на стартову сторінку: вхід за телефоном + загрузка першої виписки
+    return RedirectResponse("/", status_code=303)
 
 
 def _secret_status() -> dict:
-    """Статусы секретов (без раскрытия значений) — для админки."""
+    """Статуси секретів (без розкриття значень) — для сторінки налаштувань."""
     return {
         "deepseek_key": db.secret_is_set("deepseek_key"),
         "telegram_token": db.secret_is_set("telegram_token"),
@@ -1284,10 +1122,9 @@ def _secret_status() -> dict:
 
 @router.get("/admin", response_class=HTMLResponse)
 async def admin_page(request: Request):
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
+    """Сторінка налаштувань: провайдер/модель ШІ, ключі, користувачі, статистика.
 
+    Локальна редакція — без пароля: система працює на комп'ютері користувача."""
     thresholds = db.get_setting("alert_thresholds", {})
     categories = db.get_setting("categories", [])
     sheets = db.get_sheets_config()
@@ -1300,6 +1137,7 @@ async def admin_page(request: Request):
     except Exception:
         next_report_run = "невідомо"
 
+    provider = (db.get_setting("ai_provider") or "google").lower()
     return templates.TemplateResponse(request, "admin.html", {
         "thresholds": thresholds,
         "categories": categories,
@@ -1315,9 +1153,10 @@ async def admin_page(request: Request):
         "grant_levels": db.GRANT_LEVELS,
         "accounts": db.account_stats(),
         "allow_iban_login": bool(db.get_setting("allow_iban_login", False)),
-        "ai_provider": (db.get_setting("ai_provider") or "deepseek").lower(),
+        "owner_name": db.get_setting("owner_name") or "",
+        "ai_provider": provider,
         "ai_provider_label": {"google": "Google Gemini API", "deepseek": "DeepSeek API"}
-                             .get((db.get_setting("ai_provider") or "deepseek").lower(), "DeepSeek API"),
+                             .get(provider, "Google Gemini API"),
         "notice": request.query_params.get("msg", ""),
         "notice_ok": request.query_params.get("ok", "1") == "1",
     })
@@ -1329,9 +1168,6 @@ async def admin_save_thresholds(request: Request,
                                 category_share_pct: float = Form(30),
                                 taxes_multiplier: float = Form(3),
                                 salary_income_pct: float = Form(80)):
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     db.set_setting("alert_thresholds", {
         "cash_gap_enabled": cash_gap_enabled,
         "category_share_pct": category_share_pct,
@@ -1344,9 +1180,6 @@ async def admin_save_thresholds(request: Request,
 
 @router.post("/admin/categories")
 async def admin_save_categories(request: Request, categories: str = Form(...)):
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     # парсим: разделитель — новая строка
     cats = [c.strip() for c in categories.split("\n") if c.strip()]
     db.set_setting("categories", cats)
@@ -1357,9 +1190,6 @@ async def admin_save_categories(request: Request, categories: str = Form(...)):
 async def admin_save_secrets(request: Request,
                              deepseek_key: str = Form(""),
                              telegram_token: str = Form("")):
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     # сохраняем только непустые поля (пустое = не менять)
     if deepseek_key.strip():
         ds = deepseek_key.strip()
@@ -1395,9 +1225,6 @@ async def admin_save_sheets(request: Request,
                             sheet_id: str = Form(""),
                             enabled: bool = Form(False),
                             google_credentials: str = Form("")):
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     # валидация JSON-ключа, если поле заполнено
     creds = google_credentials.strip()
     if creds:
@@ -1421,9 +1248,6 @@ async def admin_save_sheets(request: Request,
 @router.post("/admin/export-sheets")
 async def admin_export_sheets(request: Request):
     """Экспорт текущих транзакций в Google Sheets (для кураторов)."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     cfg = db.get_sheets_config()
     if not cfg.get("sheet_id"):
         return JSONResponse({"ok": False, "error": "Спочатку введіть ID таблиці"}, status_code=400)
@@ -1453,9 +1277,6 @@ async def admin_export_sheets(request: Request):
 @router.post("/admin/update-pl")
 async def admin_update_pl(request: Request):
     """Ручное обновление P&L — для каждого месяца своя вкладка."""
-    redir = auth.require_auth(request)
-    if redir:
-        return redir
     cfg = db.get_sheets_config()
     if not cfg.get("sheet_id"):
         return JSONResponse({"ok": False, "error": "Спочатку введіть ID таблиці"}, status_code=400)

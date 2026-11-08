@@ -39,7 +39,7 @@
       </p>
       {% elif who %}
       <p class="hint" style="margin:14px 0 0;">
-        🔒 Завантаження виписок доступне з рівнем «повний». Зверніться до адміністратора.
+        🔒 Завантаження виписок зараз недоступне. Увійдіть знову за номером телефону.
       </p>
       {% else %}
       <p class="hint" style="margin:14px 0 0;">
@@ -66,12 +66,13 @@
       </div>
       {% endif %}
 
-      <!-- ВХОД ЗА ТЕЛЕФОНОМ (доступ видає адмін) — тільки для анонімів -->
+      <!-- ВХОД ЗА ТЕЛЕФОНОМ — тільки для анонімів -->
       {% if not who %}
       <div style="margin-top:24px;padding:18px;border:1px solid var(--border);border-radius:14px;">
-        <div style="font-size:17px;margin-bottom:6px;">📱 Вже є доступ? Увійдіть за телефоном</div>
+        <div style="font-size:17px;margin-bottom:6px;">📱 Увійдіть за телефоном</div>
         <p class="hint" style="margin:0 0 12px;">
-          Адмін видає доступ за номером телефону — без паролів і SMS.
+          Введіть свій номер — це і є вхід. Без паролів і SMS: кабінет
+          створюється автоматично при першому вході.
         </p>
         <form method="post" action="/login-phone" class="welcome-form">
           <div class="form-row">
@@ -85,7 +86,7 @@
       </div>
 
       {% if iban_login_allowed %}
-      <!-- ВХОД ЗА IBAN (демо-режим, вмикається в адмінці) -->
+      <!-- ВХОД ЗА IBAN (демо-режим, вмикається в налаштуваннях) -->
       <details style="margin-top:20px;">
         <summary style="cursor:pointer;font-size:17px;color:var(--text-secondary);">
           🔑 Увійти за номером рахунку (IBAN)
@@ -248,9 +249,9 @@ function showError(text) {
   localStorage.removeItem('firstUploadJob');
   resultEl.className = 'err';
   let html = '❌ ' + text;
-  // если ошибка про ключ/баланс — кнопка сразу в админку (секция «Ключі API»)
+  // если ошибка про ключ/баланс — кнопка сразу в настройки (секция «Ключі API»)
   if (/ключ|баланс/i.test(text)) {
-    html += '<br><a href="/admin#secrets" class="btn small" style="display:inline-flex;margin-top:12px;">🔑 Оновити ключ в адмінці</a>';
+    html += '<br><a href="/admin#secrets" class="btn small" style="display:inline-flex;margin-top:12px;">🔑 Оновити ключ у налаштуваннях</a>';
   } else {
     html += '<br><span style="font-size:14px;color:var(--text-muted)">Спробуйте надіслати файл ще раз.</span>';
   }

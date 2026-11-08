@@ -75,28 +75,8 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 app.include_router(dashboard_router)
 
 
-# --- Потайні двері адмінки: /admin* для сторонніх = 404 ---
-# Вхід власника: /admin?door=<секрет> (ставить cookie, далі можна без параметра).
-# Секрет зберігається в settings (admin_door). Якщо не заданий — адмінка відкрита
-# як раніше (зворотна сумісність).
-from fastapi.responses import JSONResponse as _JR  # noqa: E402
-
-
-@app.middleware("http")
-async def admin_secret_door(request, call_next):
-    path = request.url.path
-    if path == "/admin" or path.startswith("/admin/"):
-        from dashboard import db as _db
-        secret = _db.get_setting("admin_door") or ""
-        if secret:
-            token = request.query_params.get("door", "") or request.cookies.get("admin_door", "")
-            if token != secret:
-                return _JR({"detail": "Not Found"}, status_code=404)
-            response = await call_next(request)
-            response.set_cookie("admin_door", secret, max_age=30 * 86400,
-                                httponly=True, samesite="lax")
-            return response
-    return await call_next(request)
+# Локальна редакція: без паролів. Сторінка /admin («Налаштування») відкрита —
+# система працює на комп'ютері користувача, доступ до неї = доступ до комп'ютера.
 
 ALLOWED_EXTENSIONS = {".pdf", ".csv"}
 

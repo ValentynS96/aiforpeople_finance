@@ -71,7 +71,20 @@ SYSTEM_PROMPT = """Ти — AI-асистент для аналізу банкі
 - Усі суми в грн"""
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
-DASHBOARD_URL = "https://finance.aiforpeople.expert"  # посилання в повідомленнях бота
+
+
+def dashboard_url() -> str:
+    """Посилання на дашборд для повідомлень бота.
+
+    Локальна редакція: за замовчуванням http://localhost:13500 (система
+    працює на комп'ютері користувача). Можна перевизначити в налаштуваннях
+    (setting «public_url»), наприклад якщо контейнер проброшено назовні.
+    """
+    try:
+        from dashboard import db as _db
+        return (_db.get_setting("public_url") or "").strip() or "http://localhost:13500"
+    except Exception:
+        return "http://localhost:13500"
 DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"  # безопасный дефолт; реальная — из БД/админки
 
@@ -81,8 +94,12 @@ DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"  # безопасный дефол�
 # deepseek: оригінальний провайдер (залишається як запасний)
 PROVIDERS = {
     "deepseek": {"base": "https://api.deepseek.com", "default_model": DEEPSEEK_DEFAULT_MODEL},
+    # Gemma 4 не тарифицується API (Free of charge, платного тарифу для неї
+    # взагалі не існує) — студенти топлять $5 лише за Tier 1 (дані не
+    # використовуються для навчання) і не витрачають їх на запити.
+    # gemini-2.5-flash деприкується 01.12.2026 — платна альтернатива: 3.5-flash.
     "google": {"base": "https://generativelanguage.googleapis.com/v1beta/openai",
-               "default_model": "gemini-2.5-flash"},
+               "default_model": "gemma-4-31b-it"},
 }
 _PROVIDER_CACHE: dict | None = None
 
@@ -238,9 +255,10 @@ def _merge_usage(meta: dict | None, usage: dict, seconds: float, model: str):
 
 
 # Моделі-запаси: якщо активна модель віддає 5xx/429 (перебої балансувальника
-# Google), автоматично пробуємо наступну з цього списку.
+# Google), автоматично пробуємо наступну з цього списку. Обидві Gemma
+# безкоштовні; gemini-3.5-flash-lite — платний останній резерв.
 _FALLBACK_MODELS = {
-    "google": ["gemini-3.1-flash-lite", "gemma-4-26b-a4b-it"],
+    "google": ["gemma-4-26b-a4b-it", "gemini-3.5-flash-lite"],
     "deepseek": [],
 }
 
@@ -477,21 +495,25 @@ async def chat_async(messages: list[dict], api_key: str, *, timeout: int = 60,
                                    model=model, usage_meta=usage_meta)
 
 
-def list_models(api_key: str, *, timeout: int = 15) -> list[str]:
-    """Список актуальних моделей активного провайдера. Повертає ['gemma-4-26b-a4b-it', ...].
+def list_models(api_key: str, *, provider: str = "", timeout: int = 15) -> list[str]:
+    """Список актуальних моделей провайдера. Повертає ['gemini-3.5-flash', ...].
 
-    Используется админкой для заполнения dropdown актуальными именами моделей.
-    Кидає AIError при помилке.
+    provider: 'google' | 'deepseek' | '' (активний з налаштувань) — потрібно
+    майстру першого запуску, щоб перевірити ВВЕДЕНИЙ ключ ще до збереження.
+    Кидає AIError при помилці.
     """
     if not api_key:
         raise AIError("API-ключ ШІ не налаштований.")
+    base = PROVIDERS.get(provider.lower(), {}).get("base") if provider else ""
+    url = (base or _api_models_url()) + "/models"
     try:
-        resp = requests.get(_api_models_url(),
+        resp = requests.get(url,
                             headers={"Authorization": f"Bearer {api_key}"},
                             timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException as e:
-        raise AIError(f"{current_provider()['name']} API недоступний: {e}") from e
+        name = provider.lower() or current_provider()["name"]
+        raise AIError(f"{name} API недоступний: {e}") from e
     data = resp.json().get("data", [])
     # у Google id виглядає як "models/gemma-..." — прибираємо префікс
     return [m["id"].removeprefix("models/") for m in data if "id" in m]
@@ -645,7 +667,7 @@ def build_summary(metrics: dict, anomalies: dict) -> str:
         f"📦 {metrics['tx_count']} транзакцій оброблено\n\n"
         f"{'🏆 Топ-витрата: ' + metrics['top_category'] + chr(10) + chr(10) if metrics['top_category'] != '—' else ''}"
         f"{a + chr(10) + chr(10) if a else ''}"
-        f"Детальніше — у дашборді: {DASHBOARD_URL} 📊"
+        f"Детальніше — у дашборді: {dashboard_url()} 📊"
     )
 
 

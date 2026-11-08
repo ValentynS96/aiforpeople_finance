@@ -3,38 +3,101 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Первинне налаштування — AI Фінанси</title>
-<link rel="stylesheet" href="/static/style.css?v=10">
+<title>Налаштування за 1 хвилину — AI Фінанси</title>
+<link rel="stylesheet" href="/static/style.css?v=11">
+<style>
+  .provider-cards { display:grid; gap:12px; margin-bottom:8px; }
+  .provider-card {
+    display:block; padding:16px 18px; border:2px solid var(--border);
+    border-radius:14px; cursor:pointer; transition:all .15s; background:var(--bg-elevated);
+  }
+  .provider-card:hover { border-color: var(--cyan); }
+  .provider-card.selected { border-color: var(--cyan); background:rgba(34,211,238,.06); }
+  .provider-card input { display:none; }
+  .provider-title { font-size:17px; font-weight:600; margin-bottom:4px; }
+  .provider-desc { font-size:14px; color:var(--text-secondary); line-height:1.5; }
+  .privacy-badge {
+    display:inline-block; font-size:12px; padding:2px 10px; border-radius:99px;
+    background:rgba(34,197,94,.15); color:#4ade80; margin-left:8px; font-weight:600;
+  }
+  .privacy-badge.warn { background:rgba(230,162,60,.15); color:#fbbf24; }
+  #testKeyResult { margin-top:8px; font-size:14px; }
+</style>
 </head>
 <body>
-<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div>
 
 <div class="login-wrap">
-  <div class="container" style="max-width:480px;">
+  <div class="container" style="max-width:560px;">
     <div class="login-card">
-      <h1>🚀 Первинне налаштування</h1>
-      <p style="margin-bottom:20px;">Це — єдиний раз. Далі все налаштовується в адмінці.</p>
+      <h1>🚀 Налаштування за 1 хвилину</h1>
+      <p style="margin-bottom:20px;">
+        Це — єдине налаштування. Оберіть, який ШІ буде аналізувати ваші виписки,
+        і вставте його ключ. Паролів у системі немає.
+      </p>
 
-      <form method="post" action="/setup">
+      <form method="post" action="/setup" id="setupForm">
         <div class="form-row">
-          <label>1️⃣ Придумай пароль адмінки <span style="font-size:15px;color:var(--text-muted)">(для входу в /admin)</span></label>
-          <input type="password" name="password" placeholder="Пароль (мін. 4 символи)" required minlength="4" autofocus>
-        </div>
-        <div class="form-row">
-          <label>Підтверди пароль</label>
-          <input type="password" name="password2" placeholder="Ще раз" required minlength="4">
+          <label><strong>1️⃣ Хто буде думати над вашимими виписками?</strong></label>
+          <div class="provider-cards">
+            <label class="provider-card selected" id="card-google">
+              <input type="radio" name="provider" value="google" checked>
+              <div class="provider-title">🔵 Google
+                <span class="privacy-badge">🛡 не навчається на даних</span>
+                <span class="privacy-badge" style="background:rgba(34,211,238,.12);color:var(--cyan);">$0 за запити</span>
+              </div>
+              <div class="provider-desc">
+                На платному тарифі Google <b>не використовує ваші дані для навчання моделей</b> —
+                виписки залишаються вашими. Робоча модель — <b>Gemma 4</b>: вона
+                <b>безкоштовна за API</b> (не тарифицується). Отже: створіть ключ у
+                <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--cyan)">aistudio.google.com</a>
+                → «Create API key», потім поповніть баланс на <b>$5</b> — платний тариф
+                (Tier 1) активується автоматично і дає приватність; самі запити
+                залишаються безкоштовними.
+              </div>
+            </label>
+            <label class="provider-card" id="card-deepseek">
+              <input type="radio" name="provider" value="deepseek">
+              <div class="provider-title">🟠 DeepSeek
+                <span class="privacy-badge warn">⚠ може навчатися на даних</span>
+              </div>
+              <div class="provider-desc">
+                Дешевший варіант, але за політикою DeepSeek дані з API
+                <b>можуть використовуватися для навчання моделі</b>.
+                Ключ: <a href="https://platform.deepseek.com/api_keys" target="_blank" style="color:var(--cyan)">platform.deepseek.com</a>
+                → «Create new key» (потрібно поповнити баланс на $2–5).
+              </div>
+            </label>
+          </div>
         </div>
 
         <div class="form-row">
-          <label>2️⃣ DeepSeek API Key <span style="font-size:15px;color:var(--text-muted)">(мозок AI)</span></label>
-          <input type="password" name="deepseek_key" placeholder="sk-..." required>
-          <span class="hint">Отримати: <a href="https://platform.deepseek.com/" target="_blank" style="color:var(--cyan)">platform.deepseek.com</a> → API Keys (поповни баланс на $2–5)</span>
+          <label for="api_key"><strong>2️⃣ API-ключ</strong> <span style="font-size:15px;color:var(--text-muted)">(мозок ШІ)</span></label>
+          <input type="password" name="api_key" id="api_key"
+                 placeholder="AIza… (Google) · sk-… (DeepSeek)" required>
+          <span class="hint">Скопіюйте ключ повністю, без пробілів. Він зберігається
+            тільки на вашому комп'ютері.</span>
         </div>
 
         <div class="form-row">
-          <label>3️⃣ Telegram Bot Token <span style="font-size:15px;color:var(--text-muted)">(можна пізніше, в адмінці)</span></label>
-          <input type="password" name="telegram_token" placeholder="123456:AAE...">
-          <span class="hint">Отримати: <a href="https://t.me/BotFather" target="_blank" style="color:var(--cyan)">@BotFather</a> → /newbot</span>
+          <button class="btn secondary" type="button" id="testKeyBtn"
+                  style="width:100%;justify-content:center;">
+            🔌 Перевірити ключ
+          </button>
+          <div id="testKeyResult"></div>
+        </div>
+
+        <div class="form-row">
+          <label for="name">3️⃣ Як вас звати? <span style="font-size:15px;color:var(--text-muted)">(необов'язково)</span></label>
+          <input type="text" name="name" id="name" placeholder="Напр. Олена" autocomplete="name">
+        </div>
+
+        <div class="form-row">
+          <label for="telegram_token">💬 Telegram-бот <span style="font-size:15px;color:var(--text-muted)">(можна пропустити)</span></label>
+          <input type="password" name="telegram_token" id="telegram_token" placeholder="123456:AAE...">
+          <span class="hint">Хочете питати ШІ у Telegram? Створіть бота у
+            <a href="https://t.me/BotFather" target="_blank" style="color:var(--cyan)">@BotFather</a> → /newbot
+            і вставте токен. Це можна додати пізніше в налаштуваннях.</span>
         </div>
 
         <button class="btn" type="submit" style="width:100%;justify-content:center;">🚀 Почати роботу</button>
@@ -44,5 +107,42 @@
     </div>
   </div>
 </div>
+
+<script>
+// підсвітка обраної картки провайдера
+const cards = document.querySelectorAll('.provider-card');
+cards.forEach(card => card.addEventListener('click', () => {
+  cards.forEach(c => c.classList.remove('selected'));
+  card.classList.add('selected');
+}));
+
+// перевірка ключа живим запитом ДО збереження
+const provider = () => document.querySelector('input[name=provider]:checked').value;
+document.getElementById('testKeyBtn').addEventListener('click', async () => {
+  const out = document.getElementById('testKeyResult');
+  const key = document.getElementById('api_key').value.trim();
+  if (!key) { out.style.color = 'var(--red)'; out.textContent = '❌ Спочатку введіть ключ'; return; }
+  out.style.color = 'var(--text-muted)';
+  out.textContent = '⏳ Перевіряю…';
+  try {
+    const r = await fetch('/api/deepseek/test-key', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key, provider: provider()})
+    });
+    const data = await r.json();
+    if (data.ok) {
+      out.style.color = 'var(--green, #4ade80)';
+      out.textContent = `✅ Ключ робочий! Доступно моделей: ${data.models}`;
+    } else {
+      out.style.color = 'var(--red)';
+      out.textContent = '❌ ' + (data.error || 'Ключ не працює');
+    }
+  } catch (e) {
+    out.style.color = 'var(--red)';
+    out.textContent = '❌ Не вдалося зв\'язатися з сервером';
+  }
+});
+</script>
 </body>
 </html>

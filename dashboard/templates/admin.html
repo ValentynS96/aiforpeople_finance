@@ -3,18 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Адмінка — AI замість фінансиста</title>
+<title>Налаштування — AI замість фінансиста</title>
 <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
-<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+<div class="orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div>
 
 <div class="container">
   <div class="topbar">
-    <div class="topbar-brand">⚙️ <span class="gradient">Адмінка</span></div>
+    <div class="topbar-brand">⚙️ <span class="gradient">Налаштування</span></div>
     <div class="topbar-nav">
       <a href="/">📊 Дашборд</a>
-      <a href="/admin/logout">Вийти</a>
     </div>
   </div>
 
@@ -39,7 +38,7 @@
 
   <!-- НАВІГАЦІЯ ПО РОЗДІЛАХ -->
   <nav class="admin-nav">
-    <a href="#access">👤 Доступи</a>
+    <a href="#users">👤 Користувачі</a>
     <a href="#usage">📊 Статистика</a>
     <a href="#secrets">🔑 Ключі API</a>
     <a href="#model">🧠 Модель AI</a>
@@ -51,135 +50,57 @@
     <a href="#data-mgmt">⚠️ Дані</a>
   </nav>
 
-  <!-- ДОСТУПЫ ПО ТЕЛЕФОНУ -->
-  <div class="admin-section" id="access">
-    <h2>👤 Доступи за телефоном</h2>
+  <!-- КОРИСТУВАЧІ -->
+  <div class="admin-section" id="users">
+    <h2>👤 Користувачі</h2>
     <p class="desc">
-      Видайте доступ за номером телефону — людина вводить його на головній сторінці
-      і потрапляє в дашборд. Без паролів і SMS. Відкликання діє одразу.
+      Кабінет створюється автоматично при першому вході за номером телефону —
+      видавати доступи вручну не потрібно. Вхід у кабінет = номер телефону.
     </p>
-
-    <form method="post" action="/admin/grants" style="margin-bottom:22px;">
-      <div class="form-grid">
-        <div class="form-row">
-          <label>Номер телефону</label>
-          <input type="tel" name="phone" placeholder="+380 67 123 45 67" required>
-        </div>
-        <div class="form-row">
-          <label>Ім'я (для статистики)</label>
-          <input type="text" name="label" placeholder="Напр. Олена">
-        </div>
-        <div class="form-row">
-          <label>Рівень доступу</label>
-          <select name="level">
-            <option value="view">👀 Перегляд дашборда</option>
-            <option value="chat" selected>👀+💬 Перегляд + чат із ШІ</option>
-            <option value="full">🔓 Повний (чат + завантаження виписок)</option>
-          </select>
-        </div>
-        <div class="form-row">
-          <label>Строк дії</label>
-          <select name="days">
-            <option value="1">1 день</option>
-            <option value="7">7 днів</option>
-            <option value="30" selected>30 днів</option>
-            <option value="90">90 днів</option>
-            <option value="">Без строку</option>
-          </select>
-        </div>
-        <div class="form-row" style="grid-column:1/-1;">
-          <div class="checkbox-row">
-            <input type="checkbox" name="multi_account" id="multiAccount" checked>
-            <label for="multiAccount">🏦 Мультирахунок — спільний дашборд по всіх рахунках клієнта
-              <span class="hint">(платна опція; без неї клієнт бачить лише перший рахунок)</span></label>
-          </div>
-        </div>
-        <div class="form-row" style="grid-column:1/-1;">
-          <label>🔐 Код підтвердження видачі</label>
-          <input type="password" name="code" placeholder="Код видачі доступів" required
-                 autocomplete="off" inputmode="numeric">
-          <span class="hint">Другий фактор: без нього доступ видати неможливо,
-            навіть маючи пароль адмінки. Спроби з невірним кодом фіксуються в журналі.</span>
-        </div>
-        <div class="form-row" style="align-self:end;">
-          <button class="btn" type="submit" style="width:100%;justify-content:center;">➕ Видати доступ</button>
-        </div>
-      </div>
-    </form>
 
     {% if grants %}
     <table class="session-table">
-      <thead><tr><th>Телефон</th><th>Ім'я</th><th>Права</th><th>Рахунки</th><th>Telegram</th>
-        <th>Діє до (Київ)</th><th>Статус</th><th>Вхід</th><th></th></tr></thead>
+      <thead><tr><th>Телефон</th><th>Ім'я</th><th>Рахунки</th><th>Telegram</th>
+        <th>Статус</th><th>Вхід</th><th></th></tr></thead>
       <tbody>
         {% for g in grants %}
         <tr>
           <td>{{ g.phone[:6] }}•••{{ g.phone[-2:] }}</td>
           <td>{{ g.label or '—' }}</td>
           <td>
-            <form method="post" action="/admin/grants/{{ g.id }}/level" style="display:inline-flex;gap:4px;align-items:center;">
-              <select name="level" style="padding:4px 6px;border-radius:8px;
-                      background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);">
-                <option value="view" {% if g.level == 'view' %}selected{% endif %}>👀 перегляд</option>
-                <option value="chat" {% if g.level == 'chat' %}selected{% endif %}>👀+💬 з чатом</option>
-                <option value="full" {% if g.level == 'full' %}selected{% endif %}>🔓 повний</option>
-              </select>
-              <button class="btn secondary small" type="submit" title="Зберегти рівень">💾</button>
-            </form>
-          </td>
-          <td>
             {% if g.multi_account %}
-            <span class="grant-scope multi">🏦 Всі рахунки</span><br>
-            <form method="post" action="/admin/grants/{{ g.id }}/multi" style="display:inline;">
-              <input type="hidden" name="on" value="0">
-              <button class="btn secondary small" type="submit"
-                      title="Залишити клієнту лише перший рахунок">
-                → обмежити одним
-              </button>
-            </form>
+            <span class="grant-scope multi">🏦 Всі рахунки</span>
             {% else %}
-            <span class="grant-scope single">1️⃣ Лише перший рахунок</span><br>
-            <form method="post" action="/admin/grants/{{ g.id }}/multi" style="display:inline;">
-              <input type="hidden" name="on" value="1">
-              <button class="btn secondary small" type="submit"
-                      title="Дозволити бачити всі рахунки в одному дашборді">
-                → дозволити всі
-              </button>
-            </form>
+            <span class="grant-scope single">1️⃣ Лише перший рахунок</span>
             {% endif %}
           </td>
           <td>{% if g.telegram_chat_id %}✅ прив'язаний{% else %}—{% endif %}</td>
-          <td>{{ g.expires_kyiv or 'без строку' }}</td>
           <td>{% if g.status == 'active' %}<span style="color:var(--green);">● активний</span>
-              {% elif g.status == 'expired' %}<span style="color:var(--orange, #e6a23c);">● строк минув</span>
-              {% else %}<span style="color:var(--red);">● відкликано</span>{% endif %}</td>
+            {% elif g.status == 'expired' %}<span style="color:var(--orange, #e6a23c);">● строк минув</span>
+            {% else %}<span style="color:var(--red);">● відкликано</span>{% endif %}</td>
           <td title="{{ g.last_login_at or '' }}">{{ g.login_count }} · {{ g.last_login_kyiv or 'ще не входив' }}</td>
           <td style="white-space:nowrap;">
             {% if g.status != 'revoked' %}
             <form method="post" action="/admin/grants/{{ g.id }}/revoke" style="display:inline;">
-              <button class="btn secondary small" type="submit">✖ Відкликати</button>
+              <button class="btn secondary small" type="submit" title="Видалити користувача (кабінет відновиться при наступному вході)">✖ Видалити</button>
             </form>
             {% endif %}
-            <form method="post" action="/admin/grants/{{ g.id }}/extend" style="display:inline;">
-              <input type="hidden" name="days" value="30">
-              <button class="btn secondary small" type="submit">+30 дн.</button>
-            </form>
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
     {% else %}
-    <div class="empty-state"><div class="icon">🔓</div>Доступів ще не видано — заповніть форму вище</div>
+    <div class="empty-state"><div class="icon">👤</div>Ще ніхто не входив — увійдіть на головній сторінці за телефоном</div>
     {% endif %}
 
     <form method="post" action="/admin/iban-login-toggle" style="margin-top:20px;
           padding-top:16px;border-top:1px solid var(--border);">
       <div class="checkbox-row">
         <input type="checkbox" name="enabled" id="ibanLogin" {% if allow_iban_login %}checked{% endif %}>
-        <label for="ibanLogin">Дозволити вхід за IBAN без доступу (демо-режим).
+        <label for="ibanLogin">Дозволити вхід за IBAN без телефона (демо-режим).
           <span class="hint">У вимкненому стані (рекомендовано) дані доступні лише
-          за номером телефону або паролем адміністратора.</span></label>
+          за номером телефону.</span></label>
       </div>
       <button class="btn secondary small" type="submit">Зберегти</button>
     </form>
@@ -194,7 +115,7 @@
       <div class="kpi-card">
         <div class="kpi-label">Дій у журналі</div>
         <div class="kpi-value">{{ usage_totals.actions }}</div>
-        <div class="kpi-sub">чат · загрузки · входи · адмін-операції</div>
+        <div class="kpi-sub">чат · загрузки · входи · налаштування</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Запитів до DeepSeek</div>
@@ -494,10 +415,6 @@
       <br>Будуть видалені: <strong>усі транзакції</strong>, <strong>історія чату</strong>,
       <strong>бесіди</strong> та <strong>сесії завантажень</strong>.
       <br><br>Цю дію <strong>неможливо скасувати</strong>.
-    </div>
-    <div class="modal-field">
-      <label for="deletePassword">Введіть пароль для підтвердження:</label>
-      <input type="password" id="deletePassword" placeholder="Пароль адміністратора" autocomplete="off">
       <div class="modal-error" id="deleteError"></div>
     </div>
     <div class="modal-actions">
@@ -515,11 +432,13 @@ async function testDeepseekKey() {
   // проверяем то, что СЕЙЧАС в поле (если введено), иначе — сохранённый в БД
   const field = document.querySelector('input[name="deepseek_key"]');
   const key = field ? field.value.trim() : '';
+  const sel = document.getElementById('providerSelect');
+  const provider = sel ? sel.value : '';
   try {
     const resp = await fetch('/api/deepseek/test-key', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ key, provider }),
     });
     const data = await resp.json();
     if (!resp.ok || !data.ok) {
@@ -683,10 +602,8 @@ function openDeleteModal(iban) {
   pendingDeleteIban = iban;
   document.getElementById('deleteIbanMask').textContent = maskIban(iban);
   document.getElementById('deleteModal').style.display = 'flex';
-  document.getElementById('deletePassword').value = '';
   document.getElementById('deleteError').textContent = '';
   document.getElementById('deleteConfirmBtn').disabled = false;
-  setTimeout(() => document.getElementById('deletePassword').focus(), 50);
 }
 
 function closeDeleteModal() {
@@ -695,10 +612,8 @@ function closeDeleteModal() {
 }
 
 async function confirmDeleteData() {
-  const password = document.getElementById('deletePassword').value;
   const errEl = document.getElementById('deleteError');
   const btn = document.getElementById('deleteConfirmBtn');
-  if (!password) { errEl.textContent = 'Введіть пароль'; return; }
   if (!pendingDeleteIban) { errEl.textContent = 'Рахунок не обрано'; return; }
   errEl.textContent = '';
   btn.disabled = true;
@@ -707,7 +622,7 @@ async function confirmDeleteData() {
     const r = await fetch('/api/delete-data', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ password, iban: pendingDeleteIban }),
+      body: JSON.stringify({ iban: pendingDeleteIban }),
     });
     const data = await r.json();
     if (!r.ok) {
