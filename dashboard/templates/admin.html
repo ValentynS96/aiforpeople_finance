@@ -44,9 +44,7 @@
     <a href="#model">🧠 Модель AI</a>
     <a href="#categories">🏷️ Категорії</a>
     <a href="#thresholds">🚨 Пороги</a>
-    <a href="#sheets">📋 Google Sheets</a>
     <a href="#history">📜 Історія</a>
-    <a href="#automations">📅 Автоматизації</a>
     <a href="#data-mgmt">⚠️ Дані</a>
   </nav>
 
@@ -306,55 +304,6 @@
     </form>
   </div>
 
-  <!-- 4. GOOGLE SHEETS (экспорт) -->
-  <div class="admin-section" id="sheets">
-    <h2>📋 Експорт у Google Sheets</h2>
-    <p class="desc">Автоматичне експортування транзакцій у вашу Google-таблицю при кожному завантаженні виписки.</p>
-    {% if sheets_error %}<div class="login-error" style="margin-bottom:12px;">⚠️ {{ sheets_error }}</div>{% endif %}
-
-    <details style="margin-bottom:16px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
-      <summary style="cursor:pointer;font-size:14px;color:var(--text-secondary);">📖 Як підключити Google-таблицю (4 кроки)</summary>
-      <ol style="margin-top:12px;padding-left:20px;font-size:13px;color:var(--text-secondary);line-height:1.8;">
-        <li>У <a href="https://console.cloud.google.com/" target="_blank" style="color:var(--cyan);">Google Cloud Console</a> створіть проєкт → увімкніть <strong>Google Sheets API</strong> та <strong>Google Drive API</strong></li>
-        <li><strong>IAM → Service Accounts → Create</strong> → відкрийте акаунт → <strong>Keys → Add Key → JSON</strong> → скачайте файл</li>
-        <li>У своїй Google-таблиці натисніть <strong>«Поділитися»</strong> → додайте email сервіс-аккаунту (поле <code>client_email</code> у JSON) → роль <strong>«Редактор»</strong></li>
-        <li>Скопіюйте вміст JSON-файлу ↓ у поле нижче, а ID таблиці — з URL (довгий код між <code>/d/</code> і <code>/edit</code>)</li>
-      </ol>
-    </details>
-
-    <form method="post" action="/admin/sheets" style="margin-bottom:16px;">
-      <div class="form-row">
-        <label>Google Sheet ID
-          <span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:6px;">з URL таблиці</span>
-        </label>
-        <input type="text" name="sheet_id" value="{{ sheets.sheet_id }}" placeholder="1mQor8lIqxTto-IIHuX4tMWoOHzeeg-KTBiJWMA10jwQ">
-      </div>
-      <div class="form-row">
-        <label>Service Account JSON-ключ
-          {% if sheets.has_credentials %}
-          <span class="secret-status set">● налаштований</span>
-          {% else %}<span class="secret-status empty">○ не заданий</span>{% endif %}
-        </label>
-        <textarea name="google_credentials" placeholder='{ "type": "service_account", "project_id": "...", ... }' style="font-family:'Courier New',monospace;font-size:11px;min-height:120px;"></textarea>
-        <span class="hint">Вставте повний вміст JSON-файлу. Зберігається зашифрованим. Порожнє поле — не змінює існуючий ключ.</span>
-      </div>
-      <div class="checkbox-row">
-        <input type="checkbox" name="enabled" id="shEn" {% if sheets.enabled %}checked{% endif %}>
-        <label for="shEn">Увімкнути автоматичний експорт (при кожній загрузці виписки)</label>
-      </div>
-      <button class="btn small" type="submit">Зберегти конфіг</button>
-    </form>
-
-    {% if sheets.has_credentials and sheets.sheet_id %}
-    <button class="btn secondary small" onclick="exportSheets()">📥 Експортувати транзакції</button>
-    <button class="btn secondary small" onclick="updatePL()">📊 Оновити P&L (Факти)</button>
-    <span id="exportResult" style="margin-left:12px;font-size:13px;display:block;margin-top:8px;"></span>
-    <span id="plResult" style="font-size:13px;display:block;margin-top:4px;"></span>
-    {% else %}
-    <p class="desc">💡 Щоб експортувати — спочатку додайте JSON-ключ та ID таблиці.</p>
-    {% endif %}
-  </div>
-
   <!-- ИСТОРИЯ ЗАГРУЗОК -->
   <div class="admin-section" id="history">
     <h2>📜 Історія завантажень</h2>
@@ -376,17 +325,6 @@
     {% else %}
     <div class="empty-state"><div class="icon">📭</div>Поки що ніхто не завантажував виписки</div>
     {% endif %}
-  </div>
-
-  <!-- АВТОМАТИЗАЦІЇ (планировщик отчётов) -->
-  <div class="admin-section" id="automations">
-    <h2>📅 Автоматизації</h2>
-    <p class="desc">
-      Щомісячний P&L-звіт автоматично надсилається в Telegram усім рахункам з даними.
-      Наступний запуск: <strong>{{ next_report_run }}</strong> (1-го числа, 09:00, Київ).
-    </p>
-    <button class="btn secondary small" onclick="sendReportNow()">📤 Надіслати звіт зараз (демо)</button>
-    <span id="reportResult" style="margin-left:12px;font-size:13px;"></span>
   </div>
 
   <!-- КЕРУВАННЯ ДАНИМИ -->
@@ -457,48 +395,6 @@ async function testDeepseekKey() {
 // авто-проверка после сохранения ключей (?saved=secrets)
 if (new URLSearchParams(location.search).get('saved') === 'secrets') {
   setTimeout(testDeepseekKey, 500);
-}
-
-async function exportSheets() {
-  const r = document.getElementById('exportResult');
-  r.textContent = '⏳ Експорт...';
-  r.style.color = 'var(--text-muted)';
-  try {
-    const resp = await fetch('/admin/export-sheets', { method: 'POST' });
-    const data = await resp.json();
-    if (data.ok) {
-      r.innerHTML = `✅ Експортовано ${data.rows} рядків — <a href="${data.url}" target="_blank" style="color:var(--cyan)">відкрити</a>`;
-      r.style.color = 'var(--green)';
-    } else {
-      r.textContent = '❌ ' + (data.error || 'Помилка');
-      r.style.color = 'var(--red)';
-    }
-  } catch (e) {
-    r.textContent = '❌ ' + e.message;
-    r.style.color = 'var(--red)';
-  }
-}
-
-async function updatePL() {
-  const r = document.getElementById('plResult');
-  r.textContent = '⏳ Оновлюю P&L...';
-  r.style.color = 'var(--text-muted)';
-  try {
-    const resp = await fetch('/admin/update-pl', { method: 'POST' });
-    const data = await resp.json();
-    if (data.ok) {
-      r.innerHTML = `✅ Оновлено <strong>${data.updated}</strong> ячейок за <strong>${data.month || '?'}</strong>` +
-        (data.skipped_formulas ? ` (формул пропущено: ${data.skipped_formulas})` : '') +
-        (data.cells.length ? `<br><span style="font-size:11px;color:var(--text-muted)">${data.cells.join(', ')}</span>` : '');
-      r.style.color = 'var(--green)';
-    } else {
-      r.textContent = '❌ ' + (data.error || 'Помилка');
-      r.style.color = 'var(--red)';
-    }
-  } catch (e) {
-    r.textContent = '❌ ' + e.message;
-    r.style.color = 'var(--red)';
-  }
 }
 
 // ============================================================
@@ -645,30 +541,6 @@ async function confirmDeleteData() {
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDeleteModal(); });
-
-// ============================================================
-// Автоматизации: ручной запуск месячного отчёта
-// ============================================================
-async function sendReportNow() {
-  const r = document.getElementById('reportResult');
-  r.textContent = '⏳ Надсилаю...';
-  r.style.color = 'var(--text-muted)';
-  try {
-    const resp = await fetch('/admin/send-report', { method: 'POST' });
-    const data = await resp.json();
-    if (data.ok) {
-      r.textContent = `✅ Надіслано ${data.sent} звітів за ${data.month}` +
-        (data.skipped ? ` (пропущено без даних: ${data.skipped})` : '');
-      r.style.color = 'var(--green)';
-    } else {
-      r.textContent = '❌ ' + (data.error || 'Помилка');
-      r.style.color = 'var(--red)';
-    }
-  } catch (e) {
-    r.textContent = '❌ ' + e.message;
-    r.style.color = 'var(--red)';
-  }
-}
 
 loadAccounts();
 </script>
