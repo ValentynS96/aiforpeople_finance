@@ -544,6 +544,8 @@ async def api_upload(request: Request):
                                         "message": f"🧠 AI розносить транзакції: "
                                                    f"оброблено {box['done']} з {box['total']} частин..."})
             transactions = await task
+        except ai.NoTransactionsError:
+            transactions = []  # порожній період — не помилка, рахунок усе одно додаємо
         except ai.AIError as e:
             _log.error("категоризация %s: %s", filename, e)
             yield send("error", {"error": _human_ai_error(str(e))})
@@ -562,6 +564,21 @@ async def api_upload(request: Request):
                      cached_tokens=meta.get("cached_tokens", 0),
                      seconds=meta.get("seconds", 0.0),
                      details=f"{filename}: {len(transactions)} транзакцій")
+
+        if not transactions:
+            if target_iban:
+                db.register_account(ws_id, target_iban)
+            _log.info("виписка %s: операцій немає, рахунок %s", filename,
+                      mask(target_iban) if target_iban else "—")
+            all_tx = db.get_transactions(iban=target_iban or "all", chat_id=ws, limit=100000)
+            yield send("done", {
+                "ok": True,
+                "empty": True,
+                "tx_count": 0,
+                "total_tx": len(all_tx),
+                "iban_mask": mask(target_iban) if target_iban else "",
+            })
+            return
 
         # --- ЭТАП 4: Сохранение (в кабинет пользователя) ---
         yield send("step", {"step": "save", "status": "active",
@@ -698,9 +715,12 @@ async def _process_first_upload(job_id: str, content: bytes, filename: str,
                                f"🧠 AI розносить транзакції: оброблено {done} з {total} частин...")
 
         meta: dict = {}
-        transactions = await ai.categorize_async(markdown, api_key,
-                                                 categories=categories, model=model,
-                                                 progress_cb=ai_progress, usage_meta=meta)
+        try:
+            transactions = await ai.categorize_async(markdown, api_key,
+                                                     categories=categories, model=model,
+                                                     progress_cb=ai_progress, usage_meta=meta)
+        except ai.NoTransactionsError:
+            transactions = []  # порожній період — не помилка, рахунок усе одно додаємо
         update(step="ai", message=f"✅ AI розібрав {len(transactions)} транзакцій")
         db.log_usage(ws_label or "web", "загрузка виписки", source="web",
                      model=meta.get("model", ""), api_calls=meta.get("api_calls", 0),
@@ -709,6 +729,14 @@ async def _process_first_upload(job_id: str, content: bytes, filename: str,
                      cached_tokens=meta.get("cached_tokens", 0),
                      seconds=meta.get("seconds", 0.0),
                      details=f"{filename}: {len(transactions)} транзакцій")
+
+        if not transactions:
+            db.register_account(ws_id or iban, iban)
+            update(status="done", step="save", iban=iban, tx_count=0, empty=True,
+                   message=f"ℹ️ У виписці немає операцій за цей період. "
+                           f"Рахунок {mask(iban)} додано.")
+            _log.info("first-upload %s: операцій немає, iban=%s", job_id, mask(iban))
+            return
 
         update(step="save", status="running", message="💾 Зберігаю...")
         res = db_bridge.save_result(transactions, chat_id=ws_id or iban,

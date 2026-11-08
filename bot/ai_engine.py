@@ -202,6 +202,10 @@ class AIError(Exception):
     """Помилка категоризації/парсингу — ловиться в боті й відправляється юзеру."""
 
 
+class NoTransactionsError(AIError):
+    """AI відпрацював, але у виписці немає жодної операції (порожній період)."""
+
+
 def build_system_prompt(categories: list[str] | None = None) -> str:
     """Строит системный промпт с заданным списком категорий.
 
@@ -349,7 +353,7 @@ def categorize(text: str, api_key: str, *, timeout: int = 300,
             transactions.extend(result)
 
     if not transactions:
-        raise AIError("AI не знайшов транзакцій у виписці.")
+        raise NoTransactionsError("AI не знайшов транзакцій у виписці.")
     return transactions
 
 

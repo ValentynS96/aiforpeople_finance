@@ -237,7 +237,8 @@ function renderJob(job) {
   } else if (job.status === 'done') {
     doneIban = job.iban;
     resultEl.className = 'ok';
-    resultEl.innerHTML = '✅ Оброблено <strong>' + job.tx_count + '</strong> транзакцій. Все збережено!';
+    if (job.empty) resultEl.textContent = job.message;
+    else resultEl.innerHTML = '✅ Оброблено <strong>' + job.tx_count + '</strong> транзакцій. Все збережено!';
     nextBtn.disabled = false;
     nextBtn.style.opacity = '1';
     nextBtn.style.cursor = 'pointer';

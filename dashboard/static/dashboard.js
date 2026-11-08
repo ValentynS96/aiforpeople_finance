@@ -311,6 +311,11 @@ function handleUploadEvent(eventType, data, status) {
   } else if (eventType === 'error') {
     status.className = 'err';
     status.innerHTML = '❌ ' + (data.error || 'Помилка');
+  } else if (eventType === 'done' && data.empty) {
+    status.className = 'ok';
+    status.textContent = `ℹ️ У виписці немає операцій за цей період.`
+      + (data.iban_mask ? ` Рахунок ${data.iban_mask} додано.` : '');
+    initAccountSwitcher();  // новий рахунок з'являється в перемикачі
   } else if (eventType === 'done') {
     const parts = [`✅ Додано <strong>${data.tx_count}</strong> транзакцій`];
     parts.push(`Усього на рахунку: <strong>${data.total_tx}</strong>`);

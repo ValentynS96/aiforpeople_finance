@@ -287,8 +287,22 @@ async def handle_document(update: Update, _: ContextTypes.DEFAULT_TYPE):
         categories = db_bridge.get_categories()
         model = db_bridge.get_deepseek_model()
         meta: dict = {}
-        transactions = await ai.categorize_async(text, deepseek_key, categories=categories,
-                                                 model=model, usage_meta=meta)
+        try:
+            transactions = await ai.categorize_async(text, deepseek_key, categories=categories,
+                                                     model=model, usage_meta=meta)
+        except ai.NoTransactionsError:
+            # порожній період — не помилка: рахунок додаємо, повідомляємо юзера
+            from dashboard import db as dashboard_db
+            dashboard_db.register_account(str(ws_id), iban)
+            log.info("chat=%s: операцій немає (iban=%s)", chat_id, info["iban_mask"])
+            try:
+                await processing.delete()
+            except Exception:
+                pass
+            await update.message.reply_text(
+                f"ℹ️ У виписці немає операцій за цей період.\n"
+                f"🏦 Рахунок {info['iban_mask']} додано.")
+            return
         log.info("chat=%s (кабінет %s): розібрано %d транзакцій (iban=%s)",
                  chat_id, ws_id, len(transactions), iban)
         from dashboard import db as dashboard_db
