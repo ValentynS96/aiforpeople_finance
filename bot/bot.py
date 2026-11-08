@@ -43,6 +43,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
+# httpx логирует полный URL запроса, а в URL Telegram API лежит токен бота
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("webinar-bot")
 
 MIN_TEXT_LEN = 50  # короткі повідомлення — не виписки

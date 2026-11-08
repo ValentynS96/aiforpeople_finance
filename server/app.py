@@ -22,6 +22,8 @@ logging.basicConfig(
   level=logging.INFO,
   format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# httpx логирует полный URL запроса, а в URL Telegram API лежит токен бота
+logging.getLogger("httpx").setLevel(logging.WARNING)
 _log = logging.getLogger(__name__)
 
 # Состояние бота (стартует в lifespan); ссылка дублируется в server.runtime
