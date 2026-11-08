@@ -101,27 +101,19 @@ PROVIDERS = {
     "google": {"base": "https://generativelanguage.googleapis.com/v1beta/openai",
                "default_model": "gemma-4-31b-it"},
 }
-_PROVIDER_CACHE: dict | None = None
-
-
 def current_provider() -> dict:
-    """Активний провайдер: {'name', 'base', 'default_model'} з БД-налаштування."""
-    global _PROVIDER_CACHE
-    if _PROVIDER_CACHE is None:
-        try:
-            from dashboard import db as _db
-            name = (_db.get_setting("ai_provider") or "deepseek").lower()
-        except Exception:
-            name = "deepseek"
-        cfg = PROVIDERS.get(name, PROVIDERS["deepseek"])
-        _PROVIDER_CACHE = {"name": name, **cfg}
-    return _PROVIDER_CACHE
+    """Активний провайдер: {'name', 'base', 'default_model'} з БД-налаштування.
 
-
-def reset_provider_cache():
-    """Викликається після зміни провайдера в адмінці."""
-    global _PROVIDER_CACHE
-    _PROVIDER_CACHE = None
+    Читається з БД щоразу, без кешу: бот імпортує цей модуль як `ai_engine`,
+    а веб — як `bot.ai_engine` (дві окремі копії), тож кеш скидався лише
+    у веб-копії і бот після зміни провайдера ходив на старий API.
+    """
+    try:
+        from dashboard import db as _db
+        name = (_db.get_setting("ai_provider") or "deepseek").lower()
+    except Exception:
+        name = "deepseek"
+    return {"name": name, **PROVIDERS.get(name, PROVIDERS["deepseek"])}
 
 
 def _api_chat_url() -> str:

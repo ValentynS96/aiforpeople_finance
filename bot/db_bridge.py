@@ -580,6 +580,5 @@ def get_ai_provider() -> str:
 def set_ai_provider(name: str):
     from bot import ai_engine as ai
     db.set_setting("ai_provider", name if name in ai.PROVIDERS else "deepseek")
-    ai.reset_provider_cache()
     # модель за замовчуванням нового провайдера (актуальну завжди можна змінити)
     db.set_setting("deepseek_model", ai.PROVIDERS.get(name, ai.PROVIDERS["deepseek"])["default_model"])
